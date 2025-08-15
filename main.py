@@ -10,9 +10,6 @@ import requests
 import json
 import urllib.parse
 
-# -----------------------------
-# Page config & helpers
-# -----------------------------
 st.set_page_config(page_title="Auto Research Writer (Gemini API)", page_icon="🧠", layout="wide")
 st.markdown("""
 <style>
@@ -21,9 +18,6 @@ footer {visibility: hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-# -----------------------------
-# App settings
-# -----------------------------
 ARTICLE_TYPES = {
     "Systematic Review": [
         "Abstract",
@@ -244,10 +238,7 @@ def export_pdf_basic(md_text: str) -> bytes:
     c.save()
     return buf.getvalue()
 
-# -----------------------------
-# UI
-# -----------------------------
-st.title("🧠 Auto Research Writer ")
+st.title("🧠 Auto Research Writer — Gemini API Only")
 st.caption("Generate academically-styled articles using Google Gemini API. Export to DOCX/PDF.")
 
 left, right = st.columns([1.5, 1])
@@ -261,7 +252,6 @@ with left:
 
 with right:
     model_name = st.selectbox("Gemini model", ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"], index=0)
-    # Lấy API key từ secrets nếu có, ưu tiên secrets, nếu không thì nhập tay
     api_key = st.text_input(
         "GEMINI_API_KEY",
         type="password",
@@ -289,11 +279,9 @@ if st.button("🚀 Generate Article", type="primary"):
             md = None
 
         if md:
-            # Gắn link Google Scholar cho từng reference
             md_with_links = add_scholar_links_to_references(md)
             st.markdown(md_with_links)
 
-            # Kiểm tra nguồn tham khảo thực
             if want_refs and require_real_refs:
                 real_refs, fake_refs = analyze_references(md)
                 if not fake_refs and real_refs:
