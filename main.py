@@ -247,7 +247,7 @@ def export_pdf_basic(md_text: str) -> bytes:
 # -----------------------------
 # UI
 # -----------------------------
-st.title("🧠 Auto Research Writer — Gemini API Only")
+st.title("🧠 Auto Research Writer ")
 st.caption("Generate academically-styled articles using Google Gemini API. Export to DOCX/PDF.")
 
 left, right = st.columns([1.5, 1])
