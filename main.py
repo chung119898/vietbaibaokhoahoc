@@ -335,10 +335,4 @@ else:
 with st.expander("ℹ️ Setup (GitHub + Streamlit Cloud)"):
     st.markdown(
         """
-**1) Tạo repo GitHub** với các file:
-- `app.py` (file này)
-- `requirements.txt` (nội dung ở dưới)
 
-**2) Deploy lên Streamlit Cloud**
-- Vào https://share.streamlit.io → **Deploy from GitHub** → chọn repo/branch → app path `app.py`.
-- Mở **App settings → Secrets**, thêm:
