@@ -334,5 +334,4 @@ else:
 
 with st.expander("ℹ️ Setup (GitHub + Streamlit Cloud)"):
     st.markdown(
-        """
 
