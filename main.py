@@ -334,4 +334,5 @@ else:
 
 with st.expander("ℹ️ Setup (GitHub + Streamlit Cloud)"):
     st.markdown(
-
+        "Hướng dẫn cài đặt sẽ được bổ sung sau."
+    )
