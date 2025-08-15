@@ -58,7 +58,7 @@ DEFAULT_PROMPT_INSTRUCTIONS = (
     "Avoid hallucinated statistics. If asserting facts, hedge appropriately or request verification. Use concise paragraphs."
 )
 
-def compose_prompt(topic: str, article_type: str, outline: list, words_per_section: int,
+def compose_prompt(topic: str, article_type: str, outline: list,
                    extra_instructions: str, want_refs: bool):
     outline_block = "\n".join(f"## {i+1}. {sec}" for i, sec in enumerate(outline))
     refs_guidance = (
@@ -70,7 +70,7 @@ def compose_prompt(topic: str, article_type: str, outline: list, words_per_secti
 {extra_instructions}
 
 Write a {article_type} on the topic: "{topic}".
-Target ~{words_per_section} words per section. Keep paragraphs short and readable.
+Write each section as fully and comprehensively as possible, with no word limit. Do not summarize or shorten any part.
 Use the following outline exactly and write content under each header:
 {outline_block}
 
@@ -129,7 +129,6 @@ def parse_markdown_sections(md_text: str):
     return title, authors, sections
 
 def check_reference_real(ref_text):
-    # Đơn giản: nếu có "retrieval needed" hoặc "unknown" thì coi là bịa
     if re.search(r"retrieval needed|unknown|n\.d\.|no author", ref_text, re.I):
         return False
     return True
@@ -174,7 +173,8 @@ def export_docx(md_text: str) -> bytes:
     for sec, body in sections:
         doc.add_heading(sec, level=1)
         for para in body.split("\n\n"):
-            doc.add_paragraph(para)
+            if para.strip():
+                doc.add_paragraph(para)
     bio = io.BytesIO()
     doc.save(bio)
     return bio.getvalue()
@@ -231,7 +231,6 @@ with left:
     topic = st.text_input("Topic / Chủ đề", value="Green growth and sustainability")
     article_type = st.selectbox("Article type", list(ARTICLE_TYPES.keys()), index=0)
     outline = ARTICLE_TYPES[article_type]
-    words_per_section = st.slider("~Words per section", 120, 600, 220, step=20)
     want_refs = st.checkbox("Ask model to include 'References' section", value=True)
     extra_instructions = st.text_area("Extra instructions (optional)", value="Use neutral, precise language and avoid unsupported claims.")
     require_real_refs = st.checkbox("Chỉ chấp nhận bài viết có nguồn tham khảo thực (không bịa)", value=False)
@@ -252,7 +251,7 @@ if st.button("🚀 Generate Article", type="primary"):
         st.error("Please provide GEMINI_API_KEY.")
     else:
         try:
-            prompt = compose_prompt(topic, article_type, outline, words_per_section, extra_instructions, want_refs)
+            prompt = compose_prompt(topic, article_type, outline, extra_instructions, want_refs)
             md = generate_with_gemini_api(api_key, prompt, model_name)
             if not md.strip():
                 raise RuntimeError("Empty response from Gemini API")
