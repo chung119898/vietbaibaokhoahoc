@@ -6,29 +6,13 @@ import random
 import io
 import textwrap
 import re
-
-# Optional deps (handled gracefully if missing)
-try:
-    import google.generativeai as genai  # pip install google-generativeai
-except Exception:
-    genai = None
-
-try:
-    from docx import Document  # pip install python-docx
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
-except Exception:
-    Document = None
-
-try:
-    from reportlab.lib.pagesizes import A4  # pip install reportlab
-    from reportlab.pdfgen import canvas as rl_canvas
-except Exception:
-    rl_canvas = None
+import requests
+import json
 
 # -----------------------------
 # Page config & helpers
 # -----------------------------
-st.set_page_config(page_title="Auto Research Writer (LLM Edition)", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="Auto Research Writer (Gemini API)", page_icon="🧠", layout="wide")
 st.markdown("""
 <style>
 .block-container { padding-top: 1.2rem; padding-bottom: 2rem; }
@@ -74,61 +58,6 @@ DEFAULT_PROMPT_INSTRUCTIONS = (
     "Avoid hallucinated statistics. If asserting facts, hedge appropriately or request verification. Use concise paragraphs."
 )
 
-# Fallback offline generators
-SENTENCE_TEMPLATES = [
-    "{topic} has emerged as a central theme across academia, industry, and policy in the last decade.",
-    "Despite rapid progress, open questions remain regarding scalability, equity, and long-term sustainability of {topic}.",
-    "We synthesize the state of knowledge on {topic}, identify gaps, and outline actionable directions for future research.",
-    "Our analysis balances conceptual clarity with empirical rigor, offering a coherent narrative on {topic}.",
-    "Findings suggest that targeted investment, rigorous evaluation, and transparent governance are critical enablers for {topic}.",
-    "The implications of {topic} extend to environmental, economic, and social dimensions, requiring cross-disciplinary collaboration.",
-]
-METHOD_TEMPLATES = [
-    "We adopt a transparent protocol, preregistering our plan and adhering to established reporting standards.",
-    "Inclusion criteria emphasized relevance to {topic}, methodological rigor, and replicability.",
-    "Quantitative synthesis was complemented by qualitative thematic analysis to capture nuance in {topic}.",
-    "We performed sensitivity checks and triangulated across data sources to mitigate bias.",
-]
-RESULT_TEMPLATES = [
-    "Across scenarios, we observe consistent improvements associated with targeted interventions in {topic}.",
-    "Effect sizes indicate practical significance, though heterogeneity suggests contextual dependencies.",
-    "Exploratory analyses reveal non-linearities and potential threshold effects relevant to {topic}.",
-]
-DISCUSS_TEMPLATES = [
-    "The results align with prior work but extend it by formalizing assumptions and testing out-of-sample.",
-    "We caution against overgeneralization; external validity depends on data quality and institutional capacity.",
-    "Future studies should prioritize open data, preregistered designs, and standardized metrics for {topic}.",
-]
-
-def _rand_sent(templates, topic, n=4):
-    picks = random.sample(templates, k=min(n, len(templates)))
-    return " ".join(t.format(topic=topic) for t in picks)
-
-def offline_section(topic: str, section: str) -> str:
-    if re.search(r"Abstract|Executive Summary", section, re.I):
-        bank = SENTENCE_TEMPLATES
-    elif re.search(r"Method|Selection|Data", section, re.I):
-        bank = METHOD_TEMPLATES
-    elif re.search(r"Result", section, re.I):
-        bank = RESULT_TEMPLATES
-    elif re.search(r"Discussion|Gaps|Future", section, re.I):
-        bank = DISCUSS_TEMPLATES
-    else:
-        bank = SENTENCE_TEMPLATES + DISCUSS_TEMPLATES
-    text = _rand_sent(bank, topic, n=4)
-    for _ in range(3):
-        text += " " + random.choice(bank).format(topic=topic)
-    return text
-
-# -----------------------------
-# LLM (Gemini) helpers
-# -----------------------------
-def make_gemini_model(api_key: str, model_name: str = "gemini-1.5-flash"):
-    if genai is None:
-        raise RuntimeError("google-generativeai not installed. Add it to requirements.txt")
-    genai.configure(api_key=api_key)
-    return genai.GenerativeModel(model_name)
-
 def compose_prompt(topic: str, article_type: str, outline: list, words_per_section: int,
                    extra_instructions: str, want_refs: bool):
     outline_block = "\n".join(f"## {i+1}. {sec}" for i, sec in enumerate(outline))
@@ -151,17 +80,30 @@ Tone: scholarly but accessible. Avoid filler. Where evidence is uncertain, say s
 Return markdown with level-2 headers matching the outline, plus a top-level H1 title and an author line placeholder.
 """.strip()
 
-def generate_with_gemini(api_key: str, topic: str, article_type: str, outline: list,
-                         words_per_section: int, extra_instructions: str,
-                         want_refs: bool, model_name: str):
-    prompt = compose_prompt(topic, article_type, outline, words_per_section, extra_instructions, want_refs)
-    model = make_gemini_model(api_key, model_name)
-    resp = model.generate_content(prompt)
-    return resp.text or ""
+def generate_with_gemini_api(api_key: str, prompt: str, model_name: str = "gemini-2.0-flash"):
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+    headers = {
+        "Content-Type": "application/json",
+        "X-goog-api-key": api_key
+    }
+    data = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": prompt}
+                ]
+            }
+        ]
+    }
+    response = requests.post(endpoint, headers=headers, data=json.dumps(data))
+    if response.status_code != 200:
+        raise RuntimeError(f"Gemini API error: {response.status_code} {response.text}")
+    result = response.json()
+    try:
+        return result["candidates"][0]["content"]["parts"][0]["text"]
+    except Exception:
+        raise RuntimeError(f"Gemini API response parsing error: {result}")
 
-# -----------------------------
-# Export helpers (DOCX + PDF)
-# -----------------------------
 def parse_markdown_sections(md_text: str):
     title = "Untitled"
     authors = "Anonymous"
@@ -185,6 +127,39 @@ def parse_markdown_sections(md_text: str):
     if cur is not None:
         sections.append((cur, "\n".join(buf).strip()))
     return title, authors, sections
+
+def check_reference_real(ref_text):
+    # Đơn giản: nếu có "retrieval needed" hoặc "unknown" thì coi là bịa
+    if re.search(r"retrieval needed|unknown|n\.d\.|no author", ref_text, re.I):
+        return False
+    return True
+
+def analyze_references(md_text):
+    refs = []
+    in_refs = False
+    for line in md_text.splitlines():
+        if re.match(r"^##?\s*References", line, re.I):
+            in_refs = True
+            continue
+        if in_refs:
+            if line.strip() == "" or line.startswith("#"):
+                continue
+            refs.append(line.strip())
+    real_refs = [r for r in refs if check_reference_real(r)]
+    fake_refs = [r for r in refs if not check_reference_real(r)]
+    return real_refs, fake_refs
+
+try:
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+except Exception:
+    Document = None
+
+try:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as rl_canvas
+except Exception:
+    rl_canvas = None
 
 def export_docx(md_text: str) -> bytes:
     if Document is None:
@@ -248,8 +223,8 @@ def export_pdf_basic(md_text: str) -> bytes:
 # -----------------------------
 # UI
 # -----------------------------
-st.title("🧠 Auto Research Writer — Gemini + Exports")
-st.caption("Generate academically-styled articles using Google Gemini or an offline template. Export to DOCX/PDF.")
+st.title("🧠 Auto Research Writer — Gemini API Only")
+st.caption("Generate academically-styled articles using Google Gemini API. Export to DOCX/PDF.")
 
 left, right = st.columns([1.5, 1])
 with left:
@@ -259,11 +234,11 @@ with left:
     words_per_section = st.slider("~Words per section", 120, 600, 220, step=20)
     want_refs = st.checkbox("Ask model to include 'References' section", value=True)
     extra_instructions = st.text_area("Extra instructions (optional)", value="Use neutral, precise language and avoid unsupported claims.")
+    require_real_refs = st.checkbox("Chỉ chấp nhận bài viết có nguồn tham khảo thực (không bịa)", value=False)
 
 with right:
-    mode = st.radio("Generation mode", ["Gemini (LLM)", "Offline Template"], index=0)
-    model_name = st.selectbox("Gemini model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
-    api_key = st.text_input("GEMINI_API_KEY (or use st.secrets)", type="password", value=st.secrets.get("GEMINI_API_KEY", ""))
+    model_name = st.selectbox("Gemini model", ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"], index=0)
+    api_key = st.text_input("GEMINI_API_KEY", type="password", value="AIzaSyAiE7jIUSMxYSDebCdXDgxOq4mWhMuXiQE")
     seed = st.number_input("Random seed (optional)", value=0, step=1)
     include_demo_chart = st.checkbox("Add demo chart (synthetic)", value=False)
 
@@ -273,66 +248,62 @@ if seed:
 st.divider()
 
 if st.button("🚀 Generate Article", type="primary"):
-    if mode.startswith("Gemini"):
-        if not api_key:
-            st.error("Please provide GEMINI_API_KEY (Settings ➜ Secrets on Streamlit Cloud). Falling back to offline template.")
-            mode = "Offline Template"
-
-    if mode.startswith("Gemini"):
-        try:
-            md = generate_with_gemini(api_key, topic, article_type, outline, words_per_section,
-                                      extra_instructions, want_refs, model_name)
-            if not md.strip():
-                raise RuntimeError("Empty response from Gemini")
-        except Exception as e:
-            st.warning(f"Gemini error: {e}. Using offline generator instead.")
-            md = None
+    if not api_key:
+        st.error("Please provide GEMINI_API_KEY.")
     else:
-        md = None
+        try:
+            prompt = compose_prompt(topic, article_type, outline, words_per_section, extra_instructions, want_refs)
+            md = generate_with_gemini_api(api_key, prompt, model_name)
+            if not md.strip():
+                raise RuntimeError("Empty response from Gemini API")
+        except Exception as e:
+            st.error(f"Gemini API error: {e}")
+            md = None
 
-    if md is None:
-        title = f"A systematic literature review of {topic.lower()}" if article_type == "Systematic Review" else f"On {topic}"
-        parts = [f"# {title.title()}", f"**Authors:** Placeholder", f"**Date:** {datetime.now().strftime('%Y-%m-%d')}", ""]
-        for sec in outline:
-            parts.append(f"## {sec}")
-            parts.append(offline_section(topic, sec))
-            parts.append("")
-        if want_refs:
-            parts.append("## References\n(Will be curated; retrieval needed)")
-        md = "\n".join(parts)
+        if md:
+            st.markdown(md)
 
-    st.markdown(md)
+            # Kiểm tra nguồn tham khảo thực
+            if want_refs and require_real_refs:
+                real_refs, fake_refs = analyze_references(md)
+                if not fake_refs and real_refs:
+                    st.success("✅ Bài viết chuẩn có nguồn tham khảo thực (không bịa).")
+                elif fake_refs:
+                    st.warning(f"⚠️ Một số nguồn tham khảo có thể không xác thực hoặc bị bịa:\n\n" +
+                               "\n".join(f"- {r}" for r in fake_refs))
+                else:
+                    st.info("Không phát hiện nguồn tham khảo trong bài.")
 
-    if include_demo_chart:
-        st.subheader("Figure: Demonstration Time Series")
-        x = pd.date_range(datetime.now().date().replace(day=1), periods=36, freq="MS")
-        y1 = np.cumsum(np.random.randn(len(x))) + 10
-        y2 = y1 + np.random.randn(len(x)) * 0.5 + 2
-        fig_df = pd.DataFrame({"Date": x, "Baseline": y1, "Proposed": y2}).set_index("Date")
-        st.line_chart(fig_df, use_container_width=True)
-        st.caption("Synthetic data for illustrative purposes only.")
+            if include_demo_chart:
+                st.subheader("Figure: Demonstration Time Series")
+                x = pd.date_range(datetime.now().date().replace(day=1), periods=36, freq="MS")
+                y1 = np.cumsum(np.random.randn(len(x))) + 10
+                y2 = y1 + np.random.randn(len(x)) * 0.5 + 2
+                fig_df = pd.DataFrame({"Date": x, "Baseline": y1, "Proposed": y2}).set_index("Date")
+                st.line_chart(fig_df, use_container_width=True)
+                st.caption("Synthetic data for illustrative purposes only.")
 
-    st.divider()
-    st.download_button("⬇️ Download Markdown", data=md, file_name="article.md", mime="text/markdown")
+            st.divider()
+            st.download_button("⬇️ Download Markdown", data=md, file_name="article.md", mime="text/markdown")
 
-    try:
-        docx_bytes = export_docx(md)
-        st.download_button("⬇️ Download DOCX", data=docx_bytes,
-            file_name="article.docx",
-            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-    except Exception as e:
-        st.info(f"DOCX export unavailable: {e}")
+            try:
+                docx_bytes = export_docx(md)
+                st.download_button("⬇️ Download DOCX", data=docx_bytes,
+                    file_name="article.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            except Exception as e:
+                st.info(f"DOCX export unavailable: {e}")
 
-    try:
-        pdf_bytes = export_pdf_basic(md)
-        st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="article.pdf", mime="application/pdf")
-    except Exception as e:
-        st.info(f"PDF export unavailable: {e}")
+            try:
+                pdf_bytes = export_pdf_basic(md)
+                st.download_button("⬇️ Download PDF", data=pdf_bytes, file_name="article.pdf", mime="application/pdf")
+            except Exception as e:
+                st.info(f"PDF export unavailable: {e}")
 
 else:
-    st.info("Nhập chủ đề, chọn chế độ, rồi bấm **Generate Article**.")
+    st.info("Nhập chủ đề rồi bấm **Generate Article**.")
 
-with st.expander("ℹ️ Setup (GitHub + Streamlit Cloud)"):
+with st.expander("ℹ️ Setup (Gemini API)"):
     st.markdown(
-        "Hướng dẫn cài đặt sẽ được bổ sung sau."
+        "Ứng dụng này chỉ sử dụng Gemini API trực tiếp qua HTTP. Không hỗ trợ chế độ offline."
     )
