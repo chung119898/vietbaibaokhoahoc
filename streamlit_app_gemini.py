@@ -1,4 +1,4 @@
-# app_openalex_streamlit_fixed.py
+# app_openalex_streamlit_relaxed.py
 import os
 import re
 from datetime import datetime
@@ -17,11 +17,14 @@ st.title("🧪 Auto Paper: OpenAlex → (tùy chọn) Gemini viết bài")
 with st.sidebar:
     st.header("⚙️ Cấu hình tìm kiếm (OpenAlex)")
     topic = st.text_input("Chủ đề", "tăng trưởng xanh và chuyển dịch năng lượng")
-    year_range = st.text_input("Khoảng năm (YYYY-YYYY)", "2015-2025")
-    per_page = st.number_input("Số mục mỗi trang", 10, 200, 50)
-    max_pages = st.number_input("Số trang tối đa", 1, 20, 4)
-    max_sources = st.number_input("Giới hạn nguồn đầu ra", 10, 300, 60)
+    year_range = st.text_input("Khoảng năm (YYYY-YYYY)", "2000-2025")
+    per_page = st.number_input("Số mục mỗi trang", 10, 200, 100)
+    max_pages = st.number_input("Số trang tối đa", 1, 20, 8)
+    max_sources = st.number_input("Giới hạn nguồn đầu ra", 10, 500, 100)
     verify_doi = st.checkbox("Xác thực DOI (HEAD tới doi.org, có thể chậm)", False)
+    loosen_types = st.checkbox("Nới lỏng loại tài liệu (journal|proceedings|report|book-chapter)", True)
+    auto_expand_vi = st.checkbox("Tự mở rộng từ khoá VI→EN", True)
+    show_debug = st.checkbox("Hiển thị URL/meta truy vấn", True)
     st.divider()
 
     st.header("✍️ (Tuỳ chọn) Viết bằng Gemini")
@@ -85,11 +88,28 @@ def reconstruct_openalex_abstract(inv):
     positions.sort()
     return " ".join(w for _, w in positions)
 
+def expand_query_vi_to_en(q: str) -> str:
+    ql = q.lower()
+    extras = []
+    # Thêm các mở rộng phổ biến (bạn có thể chỉnh theo lĩnh vực)
+    if "tăng trưởng xanh" in ql or "green growth" in ql:
+        extras += ["green growth", "green economy", "sustainable growth"]
+    if "chuyển dịch năng lượng" in ql or "energy transition" in ql:
+        extras += ["energy transition", "decarbonization", "low-carbon transition", "renewable energy transition"]
+    if "kinh tế xanh" in ql or "green economy" in ql:
+        extras += ["green economy", "circular economy", "sustainable economy"]
+    if "phát thải" in ql or "carbon" in ql:
+        extras += ["carbon emissions", "emission reduction", "net zero", "carbon neutrality"]
+    # Gộp bản gốc + tiếng Anh mở rộng, loại trùng
+    parts = [q] + [e for e in extras if e not in q]
+    return " ".join(parts)
+
 @st.cache_data(show_spinner=False)
-def openalex_search(topic, years, per_page=50, max_pages=3):
+def openalex_search(topic, years, per_page=50, max_pages=3, loosen_types=True, auto_expand_vi=True, show_debug=False):
     base = "https://api.openalex.org/works"
+    search_q = expand_query_vi_to_en(topic) if auto_expand_vi else topic
     params = {
-        "search": topic,
+        "search": search_q,
         "filter": [],
         "per_page": per_page,
         "sort": "relevance_score:desc"
@@ -101,7 +121,8 @@ def openalex_search(topic, years, per_page=50, max_pages=3):
             params["filter"].append(f"to_publication_date:{end}-12-31")
         except ValueError:
             pass
-    params["filter"].append("type:journal-article")
+    types = "journal-article|proceedings-article|report|book-chapter" if loosen_types else "journal-article"
+    params["filter"].append(f"type:{types}")
     params["filter"] = ",".join(params["filter"])
 
     out = []
@@ -113,6 +134,9 @@ def openalex_search(topic, years, per_page=50, max_pages=3):
         r = requests.get(url, timeout=30)
         r.raise_for_status()
         data = r.json()
+        if show_debug:
+            st.caption(f"🔎 OpenAlex URL: {url}")
+            st.caption(f"📦 meta: {data.get('meta', {})}")
         for it in data.get("results", []):
             title = clean_text(it.get("title"))
             abstract = clean_text(it.get("abstract")) if it.get("abstract") else reconstruct_openalex_abstract(it.get("abstract_inverted_index"))
@@ -138,8 +162,7 @@ def openalex_search(topic, years, per_page=50, max_pages=3):
                 "venue": venue,
                 "authors": authors
             })
-        meta = data.get("meta", {})
-        cursor = meta.get("next_cursor")
+        cursor = (data.get("meta") or {}).get("next_cursor")
         if not cursor:
             break
     return out
@@ -307,7 +330,14 @@ colL, colR = st.columns([1, 1])
 if run:
     with st.spinner("Đang tìm trên OpenAlex..."):
         try:
-            works = openalex_search(topic, year_range, per_page=int(per_page), max_pages=int(max_pages))
+            works = openalex_search(
+                topic, year_range,
+                per_page=int(per_page),
+                max_pages=int(max_pages),
+                loosen_types=loosen_types,
+                auto_expand_vi=auto_expand_vi,
+                show_debug=show_debug
+            )
         except Exception as e:
             st.error(f"Lỗi OpenAlex: {e}")
             works = []
@@ -444,6 +474,6 @@ D --> E[Full-text included: {prisma.get('included_fulltext', 0)}]
 - Hoặc copy khối Markdown vào Obsidian/MkDocs/VS Code (Markdown Preview Enhanced) để render Mermaid.
 """)
     else:
-        st.warning("Không thu được nguồn nào. Hãy nới rộng năm, tăng `max_pages`, hoặc tắt xác thực DOI để thử nhanh.")
+        st.warning("Không thu được nguồn nào. Hãy nới rộng năm, tăng `max_pages`, bật 'Nới lỏng loại tài liệu' và 'Tự mở rộng từ khoá VI→EN', hoặc tắt xác thực DOI.")
 else:
     st.info("Nhập cấu hình ở thanh bên và ấn **🚀 Tạo bài viết** để bắt đầu.")
