@@ -1,4 +1,4 @@
-# app_openalex_streamlit_relaxed.py
+# streamlit_app_gemini_fixed_indent.py
 import os
 import re
 from datetime import datetime
@@ -24,19 +24,21 @@ with st.sidebar:
     verify_doi = st.checkbox("Xác thực DOI (HEAD tới doi.org, có thể chậm)", False)
     loosen_types = st.checkbox("Nới lỏng loại tài liệu (journal|proceedings|report|book-chapter)", True)
     auto_expand_vi = st.checkbox("Tự mở rộng từ khoá VI→EN", True)
-    show_debug = st.checkbox("Hiển thị URL/meta truy vấn", True)
-    st.divider()
+    show_debug = st.checkbox("Hiển thị URL/meta truy vấn", False)
 
+    st.subheader("🔐 Gemini API key")
+    gemini_key_manual = st.text_input("GEMINI_API_KEY (tuỳ chọn)", type="password")
+    if gemini_key_manual:
+        os.environ["GEMINI_API_KEY"] = gemini_key_manual
+
+    st.divider()
     st.header("✍️ (Tuỳ chọn) Viết bằng Gemini")
     use_gemini = st.checkbox("Dùng Gemini để soạn bài?", True)
     gemini_model = st.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], 0)
     author_name = st.text_input("Tác giả hiển thị", "Nhóm nghiên cứu")
     keywords = st.text_input("Từ khóa", "tăng trưởng xanh; bền vững; năng lượng tái tạo; số hoá")
     subtitle = st.text_input("Phụ đề", "Bài tổng quan hệ thống có trích dẫn học thuật")
-    # (tuỳ chọn) Nhập API key trực tiếp
-gemini_key_manual = st.text_input("GEMINI_API_KEY (tuỳ chọn)", type="password")
-if gemini_key_manual:
-    os.environ["GEMINI_API_KEY"] = gemini_key_manual
+
     st.divider()
     run = st.button("🚀 Tạo bài viết")
 
@@ -94,7 +96,6 @@ def reconstruct_openalex_abstract(inv):
 def expand_query_vi_to_en(q: str) -> str:
     ql = q.lower()
     extras = []
-    # Thêm các mở rộng phổ biến (bạn có thể chỉnh theo lĩnh vực)
     if "tăng trưởng xanh" in ql or "green growth" in ql:
         extras += ["green growth", "green economy", "sustainable growth"]
     if "chuyển dịch năng lượng" in ql or "energy transition" in ql:
@@ -103,7 +104,6 @@ def expand_query_vi_to_en(q: str) -> str:
         extras += ["green economy", "circular economy", "sustainable economy"]
     if "phát thải" in ql or "carbon" in ql:
         extras += ["carbon emissions", "emission reduction", "net zero", "carbon neutrality"]
-    # Gộp bản gốc + tiếng Anh mở rộng, loại trùng
     parts = [q] + [e for e in extras if e not in q]
     return " ".join(parts)
 
@@ -217,7 +217,8 @@ def plot_publications_by_year(df):
     else:
         counts.plot(kind="bar")
         plt.title("Số bài công bố theo năm")
-        plt.xlabel("Năm"); plt.ylabel("Số bài")
+        plt.xlabel("Năm")
+        plt.ylabel("Số bài")
         plt.tight_layout()
     return fig
 
@@ -229,7 +230,8 @@ def plot_top_venues(df, topk=10):
     else:
         vc.plot(kind="barh")
         plt.title(f"Top {topk} tạp chí/nguồn")
-        plt.xlabel("Số bài"); plt.ylabel("Tạp chí/Nguồn")
+        plt.xlabel("Số bài")
+        plt.ylabel("Tạp chí/Nguồn")
         plt.tight_layout()
     return fig
 
@@ -315,17 +317,21 @@ def write_with_gemini(model_name, prompt, max_tokens=1800):
     except Exception:
         st.error("Chưa cài `google-generativeai`. Chạy: pip install google-generativeai")
         return ""
-api_key = st.secrets.get("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
+    api_key = st.secrets.get("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         st.warning("Thiếu GEMINI_API_KEY → chỉ tạo dữ liệu & biểu đồ, không soạn văn bản.")
         return ""
     genai.configure(api_key=api_key)
-    model = genai.GenerativeModel(model_name)
-    resp = model.generate_content(
-        prompt,
-        generation_config={"temperature": 0.4, "max_output_tokens": max_tokens}
-    )
-    return resp.text or ""
+    try:
+        model = genai.GenerativeModel(model_name)
+        resp = model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": max_tokens}
+        )
+        return resp.text or ""
+    except Exception as e:
+        st.error(f"Lỗi Gemini: {e}")
+        return ""
 
 # ================== Main flow ==================
 colL, colR = st.columns([1, 1])
