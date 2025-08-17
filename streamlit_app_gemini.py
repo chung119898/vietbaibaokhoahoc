@@ -125,8 +125,9 @@ def fill_template(ctx: dict, tpl_text: str) -> str:
         "{{REFERENCES}}": render_refs(ctx.get("references", [])),
     }
     for k, v in rep.items():
-        tpl_text = tpl_text.replace(k, v)
+        tpl_text = tpl_text.replace(k, str(v) if v is not None else "")
     return tpl_text
+
 
 def ensure_template() -> str:
     if TEMPLATE_FILE.exists():
