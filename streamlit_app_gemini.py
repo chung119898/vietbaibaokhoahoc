@@ -91,7 +91,7 @@ def render_authors(authors):
 def render_refs(refs):
     out = []
     for r in refs or []:
-        # rất giản lược, bạn đã có apa_reference_formatter.py thì có thể import để format đẹp hơn
+        # rất giản lược; có thể thay bằng formatter APA riêng
         title = r.get("title","").rstrip(".")
         authors = "; ".join([f"{a.get('family','')}, {a.get('given','')}" for a in r.get("authors",[]) if a])
         year = r.get("date","n.d.")
@@ -133,6 +133,31 @@ def ensure_template() -> str:
         return TEMPLATE_FILE.read_text(encoding="utf-8")
     return DEFAULT_TEMPLATE
 
+def strip_code_fences(s: str) -> str:
+    """Loại bỏ ```yaml / ```yml / ``` khỏi văn bản để parse YAML an toàn."""
+    if not s:
+        return s
+    s = s.strip()
+    # Trường hợp mở đầu bằng ```
+    if s.startswith("```"):
+        lines = s.splitlines()
+        # Bỏ dòng mở (``` hoặc ```yaml/```yml)
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        # Tìm hàng rào đóng ```
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith("```"):
+                return "\n".join(lines[:i]).strip()
+        # Nếu không có hàng rào đóng, rơi xuống thay thế thô ở dưới
+        s = "\n".join(lines)
+    # Fallback: gỡ mọi biến thể
+    return (
+        s.replace("```yaml", "")
+         .replace("```yml", "")
+         .replace("```", "")
+         .strip()
+    )
+
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title="Gemini → Viết bài báo IMRaD + PRISMA", layout="wide")
 st.title("🧪 Gemini: Tạo bài báo khoa học từ tiêu đề")
@@ -140,7 +165,13 @@ st.title("🧪 Gemini: Tạo bài báo khoa học từ tiêu đề")
 with st.sidebar:
     st.header("Thiết lập")
     # API key: ưu tiên st.secrets["GEMINI_API_KEY"]; nếu chưa có, nhập tay
-    api_key = st.text_input("GEMINI_API_KEY", value=st.secrets.get("GEMINI_API_KEY", ""), type="password")
+    default_key = ""
+    try:
+        if "GEMINI_API_KEY" in st.secrets:
+            default_key = st.secrets.get("GEMINI_API_KEY", "")
+    except Exception:
+        default_key = ""
+    api_key = st.text_input("GEMINI_API_KEY", value=default_key, type="password")
     model_name = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
     ref_count = st.number_input("Số tài liệu tham khảo (gợi ý)", min_value=5, max_value=50, value=15)
     language = st.selectbox("Ngôn ngữ đầu ra", ["vi", "en"], index=0)
@@ -176,13 +207,14 @@ if btn:
             model = genai.GenerativeModel(model_name)
 
             sys_inst = (
-                "Bạn là trợ lý biên tập khoa học. Hãy xuất RA DUY NHẤT một YAML hợp lệ cho bài báo theo IMRaD + PRISMA.\n"
-                "Trả về các khóa bắt buộc: meta(title, subtitle, date, authors[]), abstract(text, keywords[]), sections("
-                "introduction, methods, prisma, results, discussion, conclusion, limitations), acknowledgments, "
-                "data_availability, ethics, funding, conflicts_of_interest, references[].\n"
+                "Bạn là trợ lý biên tập khoa học. Hãy xuất RA DUY NHẤT một YAML hợp lệ cho bài báo theo IMRaD + PRISMA. "
+                "TUYỆT ĐỐI KHÔNG dùng code fence, KHÔNG dùng ```yaml hay ``` bất kỳ. "
+                "Trả về các khóa bắt buộc: meta(title, subtitle, date, authors[]), abstract(text, keywords[]), "
+                "sections(introduction, methods, prisma, results, discussion, conclusion, limitations), acknowledgments, "
+                "data_availability, ethics, funding, conflicts_of_interest, references[]. "
                 "references: mỗi mục gồm type (journal_article|book|web_article|conference_paper), authors[family,given], "
-                "date (YYYY hoặc YYYY-MM hoặc YYYY-MM-DD), title, container, volume, issue, pages, doi hoặc url.\n"
-                "Ngôn ngữ: giữ đúng theo tham số 'language'. Không đưa thêm bình luận ngoài YAML."
+                "date (YYYY hoặc YYYY-MM hoặc YYYY-MM-DD), title, container, volume, issue, pages, doi hoặc url. "
+                f"Ngôn ngữ: giữ đúng theo tham số 'language'."
             )
 
             prompt = f"""
@@ -201,11 +233,12 @@ Yêu cầu nội dung:
 - Discussion nêu ý nghĩa, so sánh với nghiên cứu trước, hàm ý chính sách/thực tiễn.
 - Conclusion + Limitations rõ ràng.
 - Tạo {int(ref_count)} tài liệu tham khảo giả-lập hợp lý (không cần tồn tại thực), đúng cấu trúc trường yêu cầu.
-Trả về YAML hợp lệ, KHÔNG kèm markdown fences.
+Chỉ trả về YAML thuần, không kèm markdown fences.
             """.strip()
 
             resp = model.generate_content([sys_inst, prompt])
-            text = resp.text.strip()
+            raw_text = (getattr(resp, "text", None) or "").strip()
+            text = strip_code_fences(raw_text)
 
             # parse YAML
             ctx = yaml.safe_load(text) or {}
@@ -233,6 +266,9 @@ Trả về YAML hợp lệ, KHÔNG kèm markdown fences.
 
             st.success("Đã sinh YAML và Markdown bằng Gemini!")
         except Exception as e:
+            # Hiển thị thêm raw_text để dễ debug khi lỗi parse
+            with st.expander("Xem RAW YAML trả về (debug)"):
+                st.code(raw_text or "(trống)", language="yaml")
             st.error(f"Lỗi gọi Gemini hoặc parse YAML: {e}")
             st.stop()
 
