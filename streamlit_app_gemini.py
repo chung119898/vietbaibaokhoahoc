@@ -234,3 +234,136 @@ lang: vi
 ### 2.1 Sơ đồ PRISMA (mermaid)
 ```mermaid
 {{ prisma_mermaid }}
+# PRISMA counters
+prisma = {"initial": len(works)}
+
+# Clean + validate
+clean = []
+seen_titles = set()
+for w in works:
+    title_l = (w.get("title") or "").strip().lower()
+    if not title_l or title_l in seen_titles:
+        continue
+    seen_titles.add(title_l)
+
+    ok = False
+    doi = w.get("doi")
+    if verify_doi and doi and verify_doi_head(doi):
+        ok = True
+    elif has_valid_url(w) or doi:
+        ok = True
+
+    if ok:
+        y = w.get("year")
+        if isinstance(y, str) and y.isdigit():
+            y = int(y)
+        w["year"] = y
+        clean.append(w)
+
+prisma["deduped"] = len(clean)
+
+# Title screening
+topic_tokens = [t.strip().lower() for t in re.split(r"[;,\s]\s*", topic) if len(t.strip()) > 2]
+title_keep = []
+for w in clean:
+    t = (w.get("title") or "").lower()
+    if any(tok in t for tok in topic_tokens):
+        title_keep.append(w)
+if len(title_keep) < max(10, int(0.3*len(clean))):
+    title_keep = clean
+prisma["screened_title"] = len(title_keep)
+
+# Abstract screening
+abs_keep = []
+for w in title_keep:
+    ab = (w.get("abstract") or "").lower()
+    if ab:
+        if any(tok in ab for tok in topic_tokens):
+            abs_keep.append(w)
+    else:
+        abs_keep.append(w)
+prisma["screened_abstract"] = len(abs_keep)
+
+# Limit sources
+sources = abs_keep[: int(max_sources)]
+prisma["included_fulltext"] = len(sources)
+
+# Show table + download
+if sources:
+    df = pd.DataFrame(sources)
+    st.subheader("📚 Nguồn thu thập được (đã lọc)")
+    st.dataframe(df[["title","year","venue","doi","url","oa_pdf_url"]], use_container_width=True, height=350)
+
+    csv = df.to_csv(index=False).encode("utf-8")
+    st.download_button("⬇️ Tải sources.csv", csv, "sources.csv", "text/csv")
+
+    # Charts
+    with colL:
+        st.subheader("📈 Xu hướng công bố theo năm")
+        fig1 = plot_publications_by_year(df)
+        st.pyplot(fig1, use_container_width=True)
+
+    with colR:
+        st.subheader("🏷️ Top tạp chí/nguồn")
+        fig2 = plot_top_venues(df, topk=10)
+        st.pyplot(fig2, use_container_width=True)
+
+    # PRISMA Mermaid (hiển thị mã mermaid để bạn copy về Markdown/Pandoc)
+    st.subheader("🧭 PRISMA (Mermaid code)")
+    prisma_mermaid = f"""flowchart TB
+        # Gemini writing (optional)
+    paper_md = ""
+    if use_gemini:
+        sources_bulleted = make_sources_bulleted(sources)
+        bibliography = make_bibliography(sources)
+
+        def section(title, length_hint):
+            prompt = SECTION_PROMPT.format(
+                system=SYSTEM_STYLE_INSTR,
+                topic=topic,
+                sources_bulleted=sources_bulleted,
+                section_title=title,
+                length_hint=length_hint
+            )
+            txt = write_with_gemini(gemini_model, prompt)
+            return enforce_citation_integrity(txt, len(bibliography))
+
+        with st.spinner("Gemini đang soạn bài..."):
+            intro = section("Giới thiệu: bối cảnh, khái niệm trọng tâm, tầm quan trọng và khoảng trống nghiên cứu", 450)
+            methods = section("Phương pháp: chiến lược tìm kiếm, tiêu chí PRISMA, cơ sở dữ liệu, cách đánh giá chất lượng nghiên cứu", 350)
+            results = section("Kết quả: các cụm chủ đề, khuynh hướng định lượng, phát hiện chính so với mục tiêu nghiên cứu", 400)
+            discussion = section("Thảo luận: diễn giải phát hiện, so sánh với tài liệu, hàm ý chính sách/thực hành, tranh luận học thuật", 450)
+            conclusion = section("Kết luận: tóm tắt đóng góp, hướng nghiên cứu tiếp theo", 220)
+            limitations = section("Hạn chế: dữ liệu, phương pháp, độ bao phủ; cách khắc phục trong tương lai", 200)
+
+            context = {
+                "title": f"Tổng quan hệ thống về {topic}",
+                "subtitle": subtitle,
+                "author": author_name,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "keywords": keywords,
+                "intro": intro,
+                "methods": methods,
+                "results": results,
+                "discussion": discussion,
+                "conclusion": conclusion,
+                "limitations": limitations,
+                "prisma_mermaid": prisma_mermaid,
+                "bibliography": bibliography
+            }
+            paper_md = Template(MD_TEMPLATE).render(**context)
+
+        st.subheader("📝 Bản thảo (Markdown)")
+        st.code(paper_md, language="markdown")
+
+        st.download_button(
+            "⬇️ Tải paper.md",
+            paper_md.encode("utf-8"),
+            file_name="paper.md",
+            mime="text/markdown"
+        )
+
+    # Gợi ý xuất PDF:
+    with st.expander("💡 Gợi ý xuất PDF (tuỳ chọn)"):
+        st.markdown("""
+
