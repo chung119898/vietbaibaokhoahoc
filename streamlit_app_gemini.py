@@ -1,336 +1,437 @@
-# app.py
-import io
-import zipfile
-from pathlib import Path
-from datetime import date
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-import yaml
-import streamlit as st
+"""
+Auto-generate a PhD-style scholarly article with real citations using Gemini,
+sourcing literature from OpenAlex (default) or Google Scholar via SerpAPI.
 
-# --- Gemini ---
+- Không bịa nguồn: chỉ trích dẫn từ danh sách papers đã xác thực (có DOI/URL).
+- Có biểu đồ: publications per year, top venues.
+- Có PRISMA flow (Mermaid) dựa trên số lượng thực tế từng bước lọc.
+- Bố cục và tông giọng mô phỏng theo bài review hệ thống bạn đã gửi.
+
+Author: you + ChatGPT
+"""
+
+import os
+import re
+import json
+import time
+import math
+import argparse
+import textwrap
+from collections import Counter, defaultdict
+from datetime import datetime
+from urllib.parse import urlencode
+
+import requests
+import pandas as pd
+import matplotlib.pyplot as plt
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tqdm import tqdm
+from jinja2 import Template
+
+# -------- Gemini setup --------
 try:
     import google.generativeai as genai
 except Exception:
     genai = None
 
-# --- PDF / layout ---
-from reportlab.platypus import (
-    BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, PageBreak,
-    NextPageTemplate, FrameBreak
-)
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
-APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
-ASSETS_FONTS = APP_DIR / "assets" / "fonts"
-ASSETS_FONTS.mkdir(parents=True, exist_ok=True)
-OUT_DIR = APP_DIR / "outputs"; OUT_DIR.mkdir(exist_ok=True, parents=True)
+# ==========================
+# Utilities
+# ==========================
+def ensure_dir(path: str):
+    os.makedirs(path, exist_ok=True)
 
-# ---------- Prompt “PhD-level” ----------
-def phd_system_instruction():
-    return (
-        "Bạn là trợ lý biên tập học thuật cấp độ tiến sĩ. Hãy TRẢ VỀ DUY NHẤT một YAML hợp lệ "
-        "mô tả bản thảo theo chuẩn IMRaD + PRISMA, văn phong học thuật, khách quan, súc tích, "
-        "tránh suy diễn vô căn cứ, có nhấn mạnh đóng góp, hạn chế, và hàm ý chính sách.\n"
-        "Tuyệt đối KHÔNG dùng code fence (```yaml, ```), chỉ trả về YAML thuần.\n"
-        "YAML cần chứa các khóa:\n"
-        "meta: {title, subtitle, date, authors:[{name, affiliation?, email?, orcid?}]}\n"
-        "abstract: {text (~220-280 từ), keywords: [..]}\n"
-        "sections: {introduction, methods, prisma, results, discussion, conclusion, limitations}\n"
-        "acknowledgments, data_availability, ethics, funding, conflicts_of_interest\n"
-        "references: danh sách mục tham khảo có: type, title, container, date, authors[{family,given}], "
-        "volume?, issue?, pages?, doi? hoặc url?\n"
-        "Lưu ý: nội dung phải thống nhất, có dẫn nguồn trong văn bản (tên-năm) khi cần; "
-        "PRISMA mô tả quy trình sàng lọc; Methods nêu PICOS & chiến lược truy vấn; Results có xu hướng & bảng/điểm nhấn "
-        "(dưới dạng mô tả, không cần số liệu thật); Discussion so sánh với nghiên cứu trước; Conclusion rõ ràng; Limitations cụ thể.\n"
-        "Ngôn ngữ đầu ra đúng tham số 'language'."
-    )
-
-def make_user_prompt(title, subtitle, language, keywords, review_type, ref_count):
-    return f"""
-Sinh YAML học thuật cho bài báo:
-- title: "{title}"
-- subtitle: "{subtitle}"
-- desired_language: "{language}"
-- keywords: "{keywords}"
-- review_type: "{review_type}"
-- reference_count_hint: {int(ref_count)}
-
-Yêu cầu:
-- Văn phong tiến sĩ (phản biện, chặt chẽ, dùng thuật ngữ chuẩn).
-- Abstract 220–280 từ; từ khóa 5–8 mục.
-- Methods: PICOS, nguồn CSDL, chuỗi truy vấn ví dụ, tiêu chí đưa vào/loại ra, PRISMA (mô tả).
-- Results: tổng hợp định lượng/định tính, xu hướng theo giai đoạn, cụm chủ đề.
-- Discussion: ý nghĩa, so sánh, hàm ý chính sách/thực tiễn.
-- Conclusion + Limitations: ngắn gọn, thẳng.
-- references: ghi đủ trường như yêu cầu (có thể giả-lập hợp lý), ưu tiên có DOI.
-Chỉ trả về YAML thuần, không kèm chữ giải thích.
-""".strip()
-
-# ---------- YAML utils ----------
-def strip_code_fences(s: str) -> str:
-    if not s: return s
-    s = s.strip()
-    if s.startswith("```"):
-        lines = s.splitlines()
-        if lines and lines[0].strip().startswith("```"):
-            lines = lines[1:]
-        for i, ln in enumerate(lines):
-            if ln.strip().startswith("```"):
-                return "\n".join(lines[:i]).strip()
-        s = "\n".join(lines)
-    return s.replace("```yaml","").replace("```yml","").replace("```","").strip()
-
-def ensure_meta(ctx, title, subtitle):
-    ctx.setdefault("meta", {})
-    ctx["meta"]["title"] = ctx["meta"].get("title") or title
-    ctx["meta"]["subtitle"] = ctx["meta"].get("subtitle") or subtitle
-    # Nếu đã parse thành datetime.date thì convert về chuỗi
-    d = ctx["meta"].get("date")
-    ctx["meta"]["date"] = str(d) if d else str(date.today())
-    if not ctx["meta"].get("authors"):
-        ctx["meta"]["authors"] = [{"name":"", "affiliation":"", "email":""}]
-
-# ---------- Styles & fonts ----------
-def register_fonts():
+def year_from_date(s):
+    if not s:
+        return None
     try:
-        reg = ASSETS_FONTS/"NotoSerif-Regular.ttf"
-        bold = ASSETS_FONTS/"NotoSerif-Bold.ttf"
-        if reg.exists():
-            pdfmetrics.registerFont(TTFont("NotoSerif", str(reg)))
-            if bold.exists():
-                pdfmetrics.registerFont(TTFont("NotoSerif-Bold", str(bold)))
-            return "NotoSerif"
+        return int(str(s)[:4])
     except Exception:
-        pass
-    return "Times-Roman"
+        return None
 
-def make_styles(base_font):
-    s = getSampleStyleSheet()
-    # Tiêu đề & heading
-    s.add(ParagraphStyle(name="TitleVN", parent=s["Title"],
-                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
-                         fontSize=20, leading=24, alignment=1, spaceAfter=10))
-    s.add(ParagraphStyle(name="SubtitleVN", parent=s["Normal"],
-                         fontName=base_font, fontSize=12, leading=16, alignment=1, textColor=colors.grey))
-    s.add(ParagraphStyle(name="MetaVN", parent=s["Normal"],
-                         fontName=base_font, fontSize=10.5, leading=14, alignment=1))
-    s.add(ParagraphStyle(name="H1", parent=s["Heading1"],
-                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
-                         fontSize=14, leading=18, spaceBefore=10, spaceAfter=6))
-    s.add(ParagraphStyle(name="H2", parent=s["Heading2"],
-                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
-                         fontSize=12, leading=16, spaceBefore=8, spaceAfter=4))
-    s.add(ParagraphStyle(name="BodyVN", parent=s["Normal"],
-                         fontName=base_font, fontSize=11, leading=16))
-    s.add(ParagraphStyle(name="RefItem", parent=s["Normal"],
-                         fontName=base_font, fontSize=10.5, leading=15, leftIndent=12, spaceAfter=2))
-    s.add(ParagraphStyle(name="SmallGrey", parent=s["Normal"],
-                         fontName=base_font, fontSize=9, leading=12, textColor=colors.grey))
-    return s
+def clean_text(s: str) -> str:
+    return re.sub(r'\s+', ' ', s or '').strip()
 
-# ---------- PDF helpers (2 cột) ----------
-def draw_footer(canvas, doc):
-    canvas.saveState()
-    canvas.setFont("Times-Roman", 9)
-    canvas.setFillColor(colors.grey)
-    canvas.drawRightString(doc.pagesize[0]-doc.rightMargin, 20, f"{doc.page}")
-    canvas.restoreState()
+def has_valid_url(d):
+    for k in ["oa_pdf_url", "url", "landing_page"]:
+        if d.get(k):
+            return True
+    return False
 
-def p(txt, style):  # chuyển \n -> <br/>
-    return Paragraph(str(txt or "").replace("\n","<br/>"), style)
+def normalize_author_list(authors):
+    # Expect list of dicts with 'name' or simple strings
+    if isinstance(authors, list):
+        out = []
+        for a in authors:
+            if isinstance(a, str):
+                out.append(a)
+            elif isinstance(a, dict):
+                name = a.get("name") or a.get("author", {}).get("display_name")
+                if name:
+                    out.append(name)
+        return out
+    return []
 
-def build_first_page(ctx, styles):
-    story = []
-    m = ctx.get("meta", {})
-    abs_ = ctx.get("abstract", {}) or {}
-    # Title & metadata (full width)
-    story += [
-        p(m.get("title",""), styles["TitleVN"]),
-        p(m.get("subtitle",""), styles["SubtitleVN"]) if m.get("subtitle") else Spacer(1,2),
-        Spacer(1,6)
-    ]
-    # Authors
-    auth_lines = []
-    for a in m.get("authors") or []:
-        nm = a.get("name","")
-        extras = [x for x in [a.get("affiliation",""), f"✉ {a.get('email','')}" if a.get("email") else "", f"ORCID: {a.get('orcid','')}" if a.get("orcid") else ""] if x]
-        line = nm + (" — " + " | ".join(extras) if extras else "")
-        auth_lines.append(line)
-    if auth_lines:
-        story.append(p("<br/>".join(auth_lines), styles["MetaVN"]))
-    story.append(p(str(m.get("date","")), styles["SmallGrey"]))
-    story.append(Spacer(1,10))
-    # Abstract
-    story += [p("Tóm tắt", styles["H1"]), p(abs_.get("text",""), styles["BodyVN"])]
-    if abs_.get("keywords"):
-        story += [Spacer(1,4), p("<i>Từ khóa:</i> " + ", ".join(abs_["keywords"]), styles["BodyVN"])]
-    story += [Spacer(1,8)]
-    return story
+def doi_url(doi):
+    if not doi:
+        return None
+    doi = doi.lower().replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
+    return f"https://doi.org/{doi}"
 
-def build_body_two_cols(ctx, styles):
-    S = []
-    sec = ctx.get("sections", {}) or {}
-
-    def add_block(h, key, hstyle="H1"):
-        if sec.get(key):
-            S.append(p(h, styles[hstyle])); S.append(p(sec.get(key,""), styles["BodyVN"])); S.append(Spacer(1,6))
-
-    add_block("1. Giới thiệu", "introduction")
-    add_block("2. Phương pháp (PRISMA / Systematic Review)", "methods")
-    if sec.get("prisma"):
-        S.append(p("2.1 Sơ đồ PRISMA (mô tả)", styles["H2"])); S.append(p(sec.get("prisma",""), styles["BodyVN"])); S.append(Spacer(1,6))
-    add_block("3. Kết quả", "results")
-    add_block("4. Thảo luận", "discussion")
-    add_block("5. Kết luận", "conclusion")
-    if sec.get("limitations"):
-        S.append(p("Hạn chế", styles["H2"])); S.append(p(sec.get("limitations",""), styles["BodyVN"])); S.append(Spacer(1,6))
-
-    # Statements
-    def opt_block(h, key):
-        v = ctx.get(key, "")
-        if v:
-            S.append(p(h, styles["H1"])); S.append(p(v, styles["BodyVN"])); S.append(Spacer(1,6))
-    opt_block("Lời cảm ơn", "acknowledgments")
-    opt_block("Công bố dữ liệu / Mã nguồn", "data_availability")
-    opt_block("Đạo đức", "ethics")
-    opt_block("Tài trợ", "funding")
-    opt_block("Xung đột lợi ích", "conflicts_of_interest")
-
-    # References
-    refs = ctx.get("references") or []
-    if refs:
-        S.append(p("Tài liệu tham khảo", styles["H1"]))
-        for i, r in enumerate(refs, 1):
-            title = (r.get("title","") or "").rstrip(".")
-            authors = "; ".join([f"{a.get('family','')}, {a.get('given','')}" for a in r.get("authors",[]) if a])
-            year = r.get("date","n.d.")
-            src = r.get("container","")
-            doi = r.get("doi","") or r.get("url","")
-            text = f"{i}. {authors} ({year}). {title}. <i>{src}</i>."
-            if doi: text += f" {doi}"
-            S.append(p(text, styles["RefItem"]))
-    return S
-
-def export_pdf_two_cols(ctx, out_path: Path):
-    base_font = register_fonts()
-    styles = make_styles(base_font)
-
-    doc = BaseDocTemplate(str(out_path), pagesize=A4,
-                          leftMargin=44, rightMargin=44, topMargin=56, bottomMargin=56)
-
-    # Frames: First page (full width), then 2 columns
-    frame_full = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="full")
-    gap = 14
-    col_w = (doc.width - gap) / 2
-    frame_l = Frame(doc.leftMargin, doc.bottomMargin, col_w, doc.height, id="col1")
-    frame_r = Frame(doc.leftMargin + col_w + gap, doc.bottomMargin, col_w, doc.height, id="col2")
-
-    doc.addPageTemplates([
-        PageTemplate(id="First", frames=[frame_full], onPage=draw_footer),
-        PageTemplate(id="TwoCol", frames=[frame_l, frame_r], onPage=draw_footer),
-    ])
-
-    story = []
-    story += build_first_page(ctx, styles)
-    story += [NextPageTemplate("TwoCol"), PageBreak()]
-    story += build_body_two_cols(ctx, styles)
-
-    doc.build(story)
-
-# ---------- Streamlit UI ----------
-st.set_page_config(page_title="PhD-style Papers (IMRaD + PRISMA) → PDF 2 cột", layout="wide")
-st.title("🧪 Gemini → Viết bài học thuật kiểu 'tiến sỹ' → Xuất PDF 2 cột")
-
-with st.sidebar:
-    st.header("Thiết lập")
-    default_key = ""
+def verify_doi(doi: str, timeout=8) -> bool:
+    if not doi:
+        return False
     try:
-        if "GEMINI_API_KEY" in st.secrets:
-            default_key = st.secrets.get("GEMINI_API_KEY","")
+        r = requests.head(doi_url(doi), allow_redirects=True, timeout=timeout)
+        return r.status_code < 400
     except Exception:
-        pass
-    api_key = st.text_input("GEMINI_API_KEY", value=default_key, type="password")
-    model_name = st.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], index=0)
-    ref_count = st.number_input("Số tài liệu tham khảo (gợi ý)", min_value=8, max_value=80, value=25)
-    language = st.selectbox("Ngôn ngữ", ["vi", "en"], index=0)
-    st.caption("Bố cục PDF 2 cột (title/abstract full-width) lấy cảm hứng từ bài mẫu bạn gửi.")
+        return False
 
-col1, col2 = st.columns([1,2])
-with col1:
-    st.subheader("1) Nhập tiêu đề (mỗi dòng 1 tiêu đề)")
-    titles_text = st.text_area("Tiêu đề...", height=180, placeholder="Ví dụ:\nTổng quan hệ thống về tăng trưởng xanh tại Việt Nam")
-    subtitle = st.text_input("Phụ đề (tuỳ chọn)")
-    keywords = st.text_input("Từ khóa chung (phân tách bởi dấu phẩy)",
-                             value="tăng trưởng xanh, PRISMA, Việt Nam, tổng quan hệ thống")
-    review_type = st.selectbox("Loại bài", ["Systematic Review (PRISMA)", "Scoping Review", "Original Research"], index=0)
-    run_btn = st.button("🚀 Sinh YAML & Xuất PDF 2 cột")
 
-with col2:
-    st.subheader("2) Xem nhanh YAML")
-    tabs_area = st.empty()
-    st.subheader("3) Tải về")
-    zip_area = st.empty()
+# ==========================
+# Backends: OpenAlex / Scholar via SerpAPI
+# ==========================
+def openalex_search(topic, years, per_page=50, max_pages=3):
+    """
+    Search OpenAlex works. Returns list of dicts with keys:
+    id, title, authors, year, venue, doi, url, oa_pdf_url, abstract
+    """
+    print("[OpenAlex] searching…")
+    base = "https://api.openalex.org/works"
+    params = {
+        "search": topic,
+        "filter": [],
+        "per_page": per_page,
+        "sort": "relevance_score:desc"
+    }
+    # Filters
+    if years:
+        start, end = years.split("-")
+        params["filter"].append(f"from_publication_date:{start}-01-01")
+        params["filter"].append(f"to_publication_date:{end}-12-31")
+    # Prefer OA if possible
+    params["filter"].append("type:journal-article")
+    # Flatten filter
+    params["filter"] = ",".join(params["filter"])
 
-if run_btn:
-    titles = [t.strip() for t in (titles_text or "").splitlines() if t.strip()]
-    if not genai:
-        st.error("Chưa cài google-generativeai. Thêm vào requirements.txt và deploy lại.")
-    elif not api_key:
-        st.error("Cần nhập GEMINI_API_KEY.")
-    elif not titles:
-        st.error("Cần ít nhất 1 tiêu đề.")
+    out = []
+    cursor = "*"
+    for _ in range(max_pages):
+        q = params.copy()
+        q["cursor"] = cursor
+        url = f"{base}?{urlencode(q)}"
+        r = requests.get(url, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        for it in data.get("results", []):
+            title = clean_text(it.get("title"))
+            abstract = clean_text(it.get("abstract"))
+            doi = it.get("doi")
+            primary_location = it.get("primary_location") or {}
+            landing = primary_location.get("landing_page_url")
+            oa_url = primary_location.get("pdf_url")
+            year = year_from_date(it.get("publication_year") or it.get("publication_date"))
+            venue = (it.get("host_venue") or {}).get("display_name")
+            authors = []
+            for au in it.get("authorships", []):
+                aname = (au.get("author") or {}).get("display_name")
+                if aname:
+                    authors.append(aname)
+            out.append({
+                "id": it.get("id"),
+                "title": title,
+                "abstract": abstract,
+                "doi": doi,
+                "url": landing,
+                "oa_pdf_url": oa_url,
+                "year": year,
+                "venue": venue,
+                "authors": authors
+            })
+        meta = data.get("meta", {})
+        cursor = meta.get("next_cursor")
+        if not cursor:
+            break
+    return out
+
+def serpapi_scholar_search(topic, num=20):
+    """
+    Google Scholar via SerpAPI (needs SERPAPI_KEY)
+    Returns similar dicts.
+    """
+    key = os.getenv("SERPAPI_KEY")
+    if not key:
+        print("[SerpAPI] SERPAPI_KEY missing → skipping Scholar backend.")
+        return []
+    print("[SerpAPI/Scholar] searching…")
+    from serpapi import GoogleSearch
+    params = {
+        "engine": "google_scholar",
+        "q": topic,
+        "hl": "en",
+        "num": num,
+        "api_key": key
+    }
+    search = GoogleSearch(params)
+    results = search.get_dict()
+    out = []
+    for item in results.get("organic_results", []):
+        title = clean_text(item.get("title"))
+        year = None
+        pub_info = item.get("publication_info", {})
+        if isinstance(pub_info, dict):
+            year = pub_info.get("year") or pub_info.get("summary")
+            if isinstance(year, str):
+                m = re.search(r"(19|20)\d{2}", year)
+                year = int(m.group()) if m else None
+        link = item.get("link")
+        # DOI sometimes appears in summary/snippet
+        snippet = clean_text(item.get("snippet"))
+        mdoi = re.search(r"10\.\d{4,9}/[-._;()/:A-Z0-9]+", (snippet or ""), re.I)
+        doi = mdoi.group(0) if mdoi else None
+        authors = []
+        if isinstance(pub_info.get("authors"), list):
+            authors = [clean_text(a.get("name")) for a in pub_info["authors"] if a.get("name")]
+        out.append({
+            "id": item.get("result_id") or link,
+            "title": title,
+            "abstract": None,
+            "doi": doi,
+            "url": link,
+            "oa_pdf_url": None,
+            "year": year,
+            "venue": clean_text(pub_info.get("summary")) if isinstance(pub_info.get("summary"), str) else None,
+            "authors": authors
+        })
+    return out
+
+
+# ==========================
+# Plotting
+# ==========================
+def plot_publications_by_year(df, outpath):
+    counts = df["year"].dropna().astype(int).value_counts().sort_index()
+    plt.figure()
+    counts.plot(kind="bar")
+    plt.title("Số bài công bố theo năm")
+    plt.xlabel("Năm")
+    plt.ylabel("Số bài")
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=160)
+    plt.close()
+
+def plot_top_venues(df, outpath, topk=10):
+    vc = df["venue"].dropna().apply(lambda s: s.strip()).value_counts().head(topk)
+    plt.figure()
+    vc.plot(kind="barh")
+    plt.title(f"Top {topk} tạp chí/nguồn")
+    plt.xlabel("Số bài")
+    plt.ylabel("Tạp chí/Nguồn")
+    plt.tight_layout()
+    plt.savefig(outpath, dpi=160)
+    plt.close()
+
+
+# ==========================
+# Gemini writing
+# ==========================
+class GeminiWriter:
+    def __init__(self, model_name: str):
+        if not genai:
+            raise RuntimeError("google-generativeai chưa được cài. Vui lòng `pip install google-generativeai`.")
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("Thiếu GEMINI_API_KEY.")
+        genai.configure(api_key=api_key)
+        self.model = genai.GenerativeModel(model_name)
+
+    @retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=20),
+           retry=retry_if_exception_type(Exception))
+    def generate(self, prompt: str, max_output_tokens=1800) -> str:
+        resp = self.model.generate_content(
+            prompt,
+            generation_config={"temperature": 0.4, "max_output_tokens": max_output_tokens}
+        )
+        return resp.text or ""
+
+
+# ==========================
+# Templates & Prompting
+# ==========================
+MD_TEMPLATE = """---
+title: "{{ title }}"
+subtitle: "{{ subtitle }}"
+author:
+  - name: "{{ author }}"
+date: "{{ date }}"
+lang: vi
+---
+
+# {{ title }}
+
+**Tác giả:** {{ author }}
+
+**Từ khóa:** {{ keywords }}
+
+---
+
+## 1. Giới thiệu
+{{ intro }}
+
+## 2. Phương pháp (PRISMA / Systematic Review)
+{{ methods }}
+
+### 2.1 Sơ đồ PRISMA (mermaid)
+```mermaid
+{{ prisma_mermaid }}
+outdir = "output"
+ensure_dir(outdir)
+
+# 1) Tìm nguồn
+if args.backend == "openalex":
+    works = openalex_search(args.topic, args.years, per_page=50, max_pages=4)
+else:
+    works = serpapi_scholar_search(args.topic, num=args.max-sources)
+
+prisma = {"initial": len(works)}
+
+# 2) Làm sạch + xác thực DOI/URL
+#    - chỉ giữ entries có (DOI còn sống) hoặc URL/oa_pdf_url
+clean = []
+seen_titles = set()
+for w in works:
+    title = (w.get("title") or "").strip().lower()
+    if not title or title in seen_titles:
+        continue
+    seen_titles.add(title)
+
+    ok = False
+    doi = w.get("doi")
+    if doi and verify_doi(doi):
+        ok = True
+    elif has_valid_url(w):
+        ok = True
+
+    if ok:
+        # normalize year
+        y = w.get("year")
+        if isinstance(y, str) and y.isdigit():
+            y = int(y)
+        w["year"] = y
+        clean.append(w)
+
+prisma["deduped"] = len(clean)
+
+# 3) Sàng lọc theo tiêu đề (ví dụ: chứa từ khoá chủ đề)
+title_keep = []
+topic_tokens = [t.strip().lower() for t in re.split(r"[;,\s]\s*", args.topic) if len(t.strip()) > 2]
+for w in clean:
+    t = (w.get("title") or "").lower()
+    if any(tok in t for tok in topic_tokens):
+        title_keep.append(w)
+# Nếu lọc quá gắt, fallback giữ tất cả
+if len(title_keep) < max(10, 0.3*len(clean)):
+    title_keep = clean
+prisma["screened_title"] = len(title_keep)
+
+# 4) Sàng lọc theo abstract (nếu có)
+abs_keep = []
+for w in title_keep:
+    ab = (w.get("abstract") or "").lower()
+    if ab:
+        if any(tok in ab for tok in topic_tokens):
+            abs_keep.append(w)
     else:
-        try:
-            genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(model_name)
+        abs_keep.append(w)  # không có abstract → vẫn giữ (sẽ dùng tiêu đề/venue)
+prisma["screened_abstract"] = len(abs_keep)
 
-            tabs = st.tabs([f"Bài {i+1}" for i in range(len(titles))])
-            zip_buf = io.BytesIO()
-            with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for i, title in enumerate(titles):
-                    sys_inst = phd_system_instruction()
-                    user_prompt = make_user_prompt(title, subtitle, language, keywords, review_type, ref_count)
+# 5) Cắt theo max_sources
+sources = abs_keep[: args.max_sources]
+prisma["included_fulltext"] = len(sources)
 
-                    resp = model.generate_content([sys_inst, user_prompt])
-                    raw_text = (getattr(resp, "text", None) or "").strip()
-                    text = strip_code_fences(raw_text)
-                    ctx = yaml.safe_load(text) or {}
-                    ensure_meta(ctx, title, subtitle)
+# 6) Lưu CSV nguồn
+df = pd.DataFrame(sources)
+csv_path = os.path.join(outdir, "sources.csv")
+df.to_csv(csv_path, index=False, encoding="utf-8")
+print(f"[OK] Saved sources → {csv_path}")
 
-                    # Show YAML & Export PDF
-                    with tabs[i]:
-                        st.code(yaml.safe_dump(ctx, allow_unicode=True, sort_keys=False), language="yaml")
+# 7) Vẽ biểu đồ
+if "year" in df.columns and df["year"].notna().any():
+    plot_publications_by_year(df, os.path.join(outdir, "fig_publications_by_year.png"))
+else:
+    # tạo rỗng nếu thiếu dữ liệu năm
+    plt.figure(); plt.title("Không đủ dữ liệu năm"); plt.savefig(os.path.join(outdir, "fig_publications_by_year.png")); plt.close()
 
-                    pdf_name = f"paper_{i+1}.pdf"
-                    pdf_path = OUT_DIR / pdf_name
-                    export_pdf_two_cols(ctx, pdf_path)
-                    zf.write(str(pdf_path), arcname=pdf_name)
+if "venue" in df.columns and df["venue"].notna().any():
+    plot_top_venues(df, os.path.join(outdir, "fig_top_venues.png"))
+else:
+    plt.figure(); plt.title("Không đủ dữ liệu tạp chí"); plt.savefig(os.path.join(outdir, "fig_top_venues.png")); plt.close()
 
-            zip_buf.seek(0)
-            zip_area.download_button(
-                "⬇️ Tải tất cả PDF (ZIP)",
-                data=zip_buf.read(),
-                file_name="papers_phd_twocol.zip",
-                mime="application/zip"
-            )
-            st.success("Đã sinh bài học thuật & xuất PDF 2 cột.")
-        except Exception as e:
-            st.error(f"Lỗi xử lý: {e}")
-            # Hiển thị raw để debug nếu YAML lỗi
-            try:
-                st.code(raw_text, language="yaml")
-            except Exception:
-                pass
+# 8) Gom danh mục nguồn hiển thị + bullet cho prompt
+bibliography = make_bibliography(sources)
+sources_bulleted = make_sources_bulleted(sources)
 
-# Gợi ý font để hiển thị tiếng Việt
-with st.expander("⚠️ Font tiếng Việt cho PDF"):
-    st.markdown(
-        "- Đặt các file font vào `assets/fonts/`:\n"
-        "  - `NotoSerif-Regular.ttf`\n"
-        "  - `NotoSerif-Bold.ttf`\n"
-        "- Nếu thiếu, PDF sẽ fallback Times-Roman (có thể mất dấu)."
+# 9) Viết từng phần với Gemini
+writer = GeminiWriter(args.model)
+
+def write_section(title, length_hint=350):
+    prompt = SECTION_PROMPT.format(
+        system=SYSTEM_STYLE_INSTR,
+        topic=args.topic,
+        sources_bulleted=sources_bulleted,
+        section_title=title,
+        length_hint=length_hint
     )
+    txt = writer.generate(prompt)
+    txt = enforce_citation_integrity(txt, len(bibliography))
+    return txt
+
+# Các phần
+intro = write_section("Giới thiệu: bối cảnh, khái niệm trọng tâm, tầm quan trọng và khoảng trống nghiên cứu", 450)
+methods = write_section("Phương pháp: chiến lược tìm kiếm, tiêu chí PRISMA, cơ sở dữ liệu, cách đánh giá chất lượng nghiên cứu", 350)
+results = write_section("Kết quả: các cụm chủ đề, khuynh hướng định lượng, phát hiện chính so với mục tiêu nghiên cứu", 400)
+discussion = write_section("Thảo luận: diễn giải phát hiện, so sánh với tài liệu, hàm ý chính sách/thực hành, tranh luận học thuật", 450)
+conclusion = write_section("Kết luận: tóm tắt đóng góp, hướng nghiên cứu tiếp theo", 220)
+limitations = write_section("Hạn chế: dữ liệu, phương pháp, độ bao phủ; cách khắc phục trong tương lai", 200)
+
+# 10) PRISMA Mermaid
+prisma_mermaid = f"""flowchart TB
+# 11) Render Markdown
+context = {
+    "title": f"Tổng quan hệ thống về {args.topic}",
+    "subtitle": args.subtitle,
+    "author": args.author,
+    "date": datetime.now().strftime("%Y-%m-%d"),
+    "keywords": args.keywords,
+    "intro": intro,
+    "methods": methods,
+    "results": results,
+    "discussion": discussion,
+    "conclusion": conclusion,
+    "limitations": limitations,
+    "prisma_mermaid": prisma_mermaid,
+    "bibliography": bibliography
+}
+md = Template(MD_TEMPLATE).render(**context)
+
+md_path = os.path.join(outdir, "paper.md")
+with open(md_path, "w", encoding="utf-8") as f:
+    f.write(md)
+print(f"[OK] Wrote Markdown → {md_path}")
+print("[DONE] Bạn có thể dùng pandoc/typst để xuất PDF nếu muốn.")
+
+---
+
+## Ghi chú quan trọng (để bạn dùng an toàn & “đúng chuẩn”)
+
+- **Không bịa nguồn**: Script **chỉ** cho phép trích dẫn các mục nằm trong `sources.csv`. Sau khi Gemini tạo văn bản, có bước **lọc trích dẫn** để loại mọi `[n]` vượt ngoài số lượng nguồn có thật.
+- **Google Scholar**: Truy cập trực tiếp bằng “scraper” có thể vi phạm TOS. Ở đây mình cung cấp **tuỳ chọn SerpAPI** (dịch vụ hợp lệ) để lấy dữ liệu Scholar (`--backend scholar` + `SERPAPI_KEY`). Nếu bạn không có SerpAPI, mặc định dùng **OpenAlex** — dữ liệu học thuật mở, giàu DOI, dễ xác thực (rất phù hợp tiêu chí **không bịa nguồn**).
+- **PRISMA**: Các con số trong sơ đồ được lấy **thật** từ pipeline (tổng kết quả, sau khử trùng lặp, sau sàng lọc tiêu đề/tóm tắt, số cuối cùng giữ lại).
+- **Biểu đồ**: tạo từ metadata thu thập được (năm công bố, tạp chí). Bạn có thể mở rộng để trích **bảng số liệu** trong PDF (Camelot/Tabula) nếu muốn thêm đồ thị chuyên sâu.
+- **Lỗi 429 (quota)**: Đã cài **retry + backoff**. Có thể giảm độ dài mục, hoặc dùng `--model gemini-1.5-flash` cho nhẹ hơn.
+
+Muốn làm bản **Streamlit** hay xuất **PDF tự động bằng Pandoc**, mình có thể viết thêm ngay trong phiên sau.
+
