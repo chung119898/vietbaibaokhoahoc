@@ -1,3 +1,4 @@
 streamlit
 PyYAML
 google-generativeai
+reportlab
