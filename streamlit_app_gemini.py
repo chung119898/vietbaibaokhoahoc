@@ -284,9 +284,13 @@ lang: vi
 ---
 
 ## Tài liệu tham khảo
-{% for i, src in enumerate(bibliography, start=1) -%}
-[{{i}}] {{ src }}
+{% if bibliography %}
+{% for src in bibliography -%}
+[{{ loop.index }}] {{ src }}
 {% endfor %}
+{% else %}
+_Chưa có nguồn hợp lệ._
+{% endif %}
 """
 
 SYSTEM_STYLE_INSTR = """Bạn là một nhà nghiên cứu (tiến sĩ) viết văn phong học thuật, mạch lạc, có trích dẫn theo dạng [#] đúng vị trí. Tuyệt đối không được bịa nguồn hay chèn trích dẫn không có trong danh mục 'CÁC NGUỒN HỢP LỆ'. Nếu không đủ bằng chứng, hãy nói rõ 'chưa đủ bằng chứng từ nguồn hợp lệ' thay vì suy đoán."""
