@@ -1,5 +1,4 @@
 # app.py
-import os
 import io
 import zipfile
 from pathlib import Path
@@ -8,106 +7,72 @@ from datetime import date
 import yaml
 import streamlit as st
 
-# --- Gemini setup ---
+# --- Gemini ---
 try:
     import google.generativeai as genai
 except Exception:
     genai = None
 
 # --- PDF / layout ---
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak, Table, TableStyle
+from reportlab.platypus import (
+    BaseDocTemplate, PageTemplate, Frame, Paragraph, Spacer, PageBreak,
+    NextPageTemplate, FrameBreak
+)
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 
-# -------- Paths / constants --------
 APP_DIR = Path(__file__).parent if "__file__" in globals() else Path(".")
-ASSETS_DIR = APP_DIR / "assets" / "fonts"
-ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+ASSETS_FONTS = APP_DIR / "assets" / "fonts"
+ASSETS_FONTS.mkdir(parents=True, exist_ok=True)
+OUT_DIR = APP_DIR / "outputs"; OUT_DIR.mkdir(exist_ok=True, parents=True)
 
-TEMPLATE_FILE = APP_DIR / "TEMPLATE.md"
-OUTPUT_DIR = APP_DIR / "outputs"
-OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
+# ---------- Prompt “PhD-level” ----------
+def phd_system_instruction():
+    return (
+        "Bạn là trợ lý biên tập học thuật cấp độ tiến sĩ. Hãy TRẢ VỀ DUY NHẤT một YAML hợp lệ "
+        "mô tả bản thảo theo chuẩn IMRaD + PRISMA, văn phong học thuật, khách quan, súc tích, "
+        "tránh suy diễn vô căn cứ, có nhấn mạnh đóng góp, hạn chế, và hàm ý chính sách.\n"
+        "Tuyệt đối KHÔNG dùng code fence (```yaml, ```), chỉ trả về YAML thuần.\n"
+        "YAML cần chứa các khóa:\n"
+        "meta: {title, subtitle, date, authors:[{name, affiliation?, email?, orcid?}]}\n"
+        "abstract: {text (~220-280 từ), keywords: [..]}\n"
+        "sections: {introduction, methods, prisma, results, discussion, conclusion, limitations}\n"
+        "acknowledgments, data_availability, ethics, funding, conflicts_of_interest\n"
+        "references: danh sách mục tham khảo có: type, title, container, date, authors[{family,given}], "
+        "volume?, issue?, pages?, doi? hoặc url?\n"
+        "Lưu ý: nội dung phải thống nhất, có dẫn nguồn trong văn bản (tên-năm) khi cần; "
+        "PRISMA mô tả quy trình sàng lọc; Methods nêu PICOS & chiến lược truy vấn; Results có xu hướng & bảng/điểm nhấn "
+        "(dưới dạng mô tả, không cần số liệu thật); Discussion so sánh với nghiên cứu trước; Conclusion rõ ràng; Limitations cụ thể.\n"
+        "Ngôn ngữ đầu ra đúng tham số 'language'."
+    )
 
-# -------- Markdown template (để render bản xem trên UI; PDF render riêng) --------
-DEFAULT_TEMPLATE = """---
-title: "{{TITLE}}"
-subtitle: "{{SUBTITLE}}"
-author:
-  - name: ""
-date: "{{DATE}}"
-lang: vi
----
+def make_user_prompt(title, subtitle, language, keywords, review_type, ref_count):
+    return f"""
+Sinh YAML học thuật cho bài báo:
+- title: "{title}"
+- subtitle: "{subtitle}"
+- desired_language: "{language}"
+- keywords: "{keywords}"
+- review_type: "{review_type}"
+- reference_count_hint: {int(ref_count)}
 
-# {{TITLE}}
+Yêu cầu:
+- Văn phong tiến sĩ (phản biện, chặt chẽ, dùng thuật ngữ chuẩn).
+- Abstract 220–280 từ; từ khóa 5–8 mục.
+- Methods: PICOS, nguồn CSDL, chuỗi truy vấn ví dụ, tiêu chí đưa vào/loại ra, PRISMA (mô tả).
+- Results: tổng hợp định lượng/định tính, xu hướng theo giai đoạn, cụm chủ đề.
+- Discussion: ý nghĩa, so sánh, hàm ý chính sách/thực tiễn.
+- Conclusion + Limitations: ngắn gọn, thẳng.
+- references: ghi đủ trường như yêu cầu (có thể giả-lập hợp lý), ưu tiên có DOI.
+Chỉ trả về YAML thuần, không kèm chữ giải thích.
+""".strip()
 
-**Tác giả**  
-{{AUTHORS}}
-
-## Tóm tắt
-{{ABSTRACT}}
-
-**Từ khóa:** {{KEYWORDS}}
-
----
-
-## 1. Giới thiệu
-{{INTRO}}
-
-## 2. Phương pháp (PRISMA / Systematic Review)
-{{METHODS}}
-
-### 2.1 Sơ đồ PRISMA (mô tả ngắn)
-{{PRISMA}}
-
-## 3. Kết quả
-{{RESULTS}}
-
-## 4. Thảo luận
-{{DISCUSSION}}
-
-## 5. Kết luận
-{{CONCLUSION}}
-
-### Hạn chế
-{{LIMITATIONS}}
-
----
-
-## Lời cảm ơn
-{{ACK}}
-
-## Công bố dữ liệu / Mã nguồn
-{{DATA_AVAIL}}
-
-## Đạo đức
-{{ETHICS}}
-
-## Tài trợ
-{{FUNDING}}
-
-## Xung đột lợi ích
-{{CONFLICTS}}
-
----
-
-## Tài liệu tham khảo
-{{REFERENCES}}
-"""
-
-# ===================== Utilities =====================
-
-def ensure_template() -> str:
-    if TEMPLATE_FILE.exists():
-        return TEMPLATE_FILE.read_text(encoding="utf-8")
-    return DEFAULT_TEMPLATE
-
+# ---------- YAML utils ----------
 def strip_code_fences(s: str) -> str:
-    """Loại bỏ ```yaml/```yml/``` khỏi văn bản để parse YAML an toàn."""
-    if not s:
-        return s
+    if not s: return s
     s = s.strip()
     if s.startswith("```"):
         lines = s.splitlines()
@@ -117,233 +82,171 @@ def strip_code_fences(s: str) -> str:
             if ln.strip().startswith("```"):
                 return "\n".join(lines[:i]).strip()
         s = "\n".join(lines)
-    return s.replace("```yaml", "").replace("```yml", "").replace("```", "").strip()
+    return s.replace("```yaml","").replace("```yml","").replace("```","").strip()
 
-def render_authors(authors):
-    lines = []
-    for a in authors or []:
-        extras = []
-        if a.get("affiliation"): extras.append(a["affiliation"])
-        if a.get("email"): extras.append(f"✉ {a['email']}")
-        if a.get("orcid"): extras.append(f"ORCID: {a['orcid']}")
-        nm = a.get("name","")
-        lines.append(f"- **{nm}**" + (" — " + " | ".join(extras) if extras else ""))
-    return "\n".join(lines)
+def ensure_meta(ctx, title, subtitle):
+    ctx.setdefault("meta", {})
+    ctx["meta"]["title"] = ctx["meta"].get("title") or title
+    ctx["meta"]["subtitle"] = ctx["meta"].get("subtitle") or subtitle
+    # Nếu đã parse thành datetime.date thì convert về chuỗi
+    d = ctx["meta"].get("date")
+    ctx["meta"]["date"] = str(d) if d else str(date.today())
+    if not ctx["meta"].get("authors"):
+        ctx["meta"]["authors"] = [{"name":"", "affiliation":"", "email":""}]
 
-def render_refs_markdown(refs):
-    out = []
-    for r in refs or []:
-        title = (r.get("title","") or "").rstrip(".")
-        authors = "; ".join([f"{a.get('family','')}, {a.get('given','')}" for a in r.get("authors",[]) if a])
-        year = r.get("date","n.d.")
-        src = r.get("container","")
-        doi = r.get("doi","") or r.get("url","")
-        piece = f"{authors} ({year}). {title}. *{src}*."
-        if doi: piece += f" {doi}"
-        out.append(f"- {piece}")
-    return "\n".join(out)
-
-def fill_template(ctx: dict, tpl_text: str) -> str:
-    rep = {
-        "{{TITLE}}": ctx.get("meta", {}).get("title", ""),
-        "{{SUBTITLE}}": ctx.get("meta", {}).get("subtitle", ""),
-        "{{DATE}}": ctx.get("meta", {}).get("date", str(date.today())),
-        "{{AUTHORS}}": render_authors(ctx.get("meta", {}).get("authors", [])),
-        "{{ABSTRACT}}": ctx.get("abstract", {}).get("text", ""),
-        "{{KEYWORDS}}": ", ".join(ctx.get("abstract", {}).get("keywords", []) or []),
-        "{{INTRO}}": ctx.get("sections", {}).get("introduction", ""),
-        "{{METHODS}}": ctx.get("sections", {}).get("methods", ""),
-        "{{PRISMA}}": ctx.get("sections", {}).get("prisma", ""),
-        "{{RESULTS}}": ctx.get("sections", {}).get("results", ""),
-        "{{DISCUSSION}}": ctx.get("sections", {}).get("discussion", ""),
-        "{{CONCLUSION}}": ctx.get("sections", {}).get("conclusion", ""),
-        "{{LIMITATIONS}}": ctx.get("sections", {}).get("limitations", ""),
-        "{{ACK}}": (ctx.get("acknowledgments", "") or "").strip(),
-        "{{DATA_AVAIL}}": ctx.get("data_availability", ""),
-        "{{ETHICS}}": ctx.get("ethics", ""),
-        "{{FUNDING}}": ctx.get("funding", ""),
-        "{{CONFLICTS}}": ctx.get("conflicts_of_interest", ""),
-        "{{REFERENCES}}": render_refs_markdown(ctx.get("references", [])),
-    }
-    for k, v in rep.items():
-        tpl_text = tpl_text.replace(k, "" if v is None else str(v))
-    return tpl_text
-
-def normalize_text(x):
-    if x is None: return ""
-    if isinstance(x, (int, float, date)): return str(x)
-    return str(x)
-
-# -------- PDF helpers --------
-
-def _register_fonts():
-    """
-    Cố gắng dùng NotoSerif (Unicode tốt cho tiếng Việt).
-    Đặt file:
-      assets/fonts/NotoSerif-Regular.ttf
-      assets/fonts/NotoSerif-Bold.ttf
-      assets/fonts/NotoSerif-Italic.ttf (tuỳ)
-    Nếu không có -> fallback Times-Roman (có thể mất dấu tiếng Việt).
-    """
-    regular = ASSETS_DIR / "NotoSerif-Regular.ttf"
-    bold = ASSETS_DIR / "NotoSerif-Bold.ttf"
-    italic = ASSETS_DIR / "NotoSerif-Italic.ttf"
+# ---------- Styles & fonts ----------
+def register_fonts():
     try:
-        if regular.exists():
-            pdfmetrics.registerFont(TTFont("NotoSerif", str(regular)))
+        reg = ASSETS_FONTS/"NotoSerif-Regular.ttf"
+        bold = ASSETS_FONTS/"NotoSerif-Bold.ttf"
+        if reg.exists():
+            pdfmetrics.registerFont(TTFont("NotoSerif", str(reg)))
             if bold.exists():
                 pdfmetrics.registerFont(TTFont("NotoSerif-Bold", str(bold)))
-            if italic.exists():
-                pdfmetrics.registerFont(TTFont("NotoSerif-Italic", str(italic)))
             return "NotoSerif"
     except Exception:
         pass
-    return "Times-Roman"  # fallback
+    return "Times-Roman"
 
-def _styles(base_font):
-    styles = getSampleStyleSheet()
-    # Cleanup & redefine styles with our base font
-    styles.add(ParagraphStyle(
-        name="TitleVN", parent=styles["Title"], fontName=base_font if base_font=="Times-Roman" else "NotoSerif-Bold",
-        fontSize=20, leading=24, alignment=1, spaceAfter=12
-    ))
-    styles.add(ParagraphStyle(
-        name="SubtitleVN", parent=styles["Normal"], fontName=base_font, fontSize=12, leading=16, alignment=1, textColor=colors.grey
-    ))
-    styles.add(ParagraphStyle(
-        name="MetaVN", parent=styles["Normal"], fontName=base_font, fontSize=10, leading=14, alignment=1
-    ))
-    styles.add(ParagraphStyle(
-        name="H1", parent=styles["Heading1"], fontName=base_font if base_font=="Times-Roman" else "NotoSerif-Bold",
-        fontSize=14, leading=18, spaceBefore=12, spaceAfter=6
-    ))
-    styles.add(ParagraphStyle(
-        name="H2", parent=styles["Heading2"], fontName=base_font if base_font=="Times-Roman" else "NotoSerif-Bold",
-        fontSize=12, leading=16, spaceBefore=10, spaceAfter=4
-    ))
-    styles.add(ParagraphStyle(
-        name="BodyVN", parent=styles["Normal"], fontName=base_font, fontSize=11, leading=16
-    ))
-    styles.add(ParagraphStyle(
-        name="ItalicVN", parent=styles["Normal"], fontName=base_font, fontSize=11, leading=16, textColor=colors.black
-    ))
-    styles.add(ParagraphStyle(
-        name="RefItem", parent=styles["Normal"], fontName=base_font, fontSize=10.5, leading=15, leftIndent=12, spaceAfter=3
-    ))
-    return styles
+def make_styles(base_font):
+    s = getSampleStyleSheet()
+    # Tiêu đề & heading
+    s.add(ParagraphStyle(name="TitleVN", parent=s["Title"],
+                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
+                         fontSize=20, leading=24, alignment=1, spaceAfter=10))
+    s.add(ParagraphStyle(name="SubtitleVN", parent=s["Normal"],
+                         fontName=base_font, fontSize=12, leading=16, alignment=1, textColor=colors.grey))
+    s.add(ParagraphStyle(name="MetaVN", parent=s["Normal"],
+                         fontName=base_font, fontSize=10.5, leading=14, alignment=1))
+    s.add(ParagraphStyle(name="H1", parent=s["Heading1"],
+                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
+                         fontSize=14, leading=18, spaceBefore=10, spaceAfter=6))
+    s.add(ParagraphStyle(name="H2", parent=s["Heading2"],
+                         fontName="NotoSerif-Bold" if base_font!="Times-Roman" else base_font,
+                         fontSize=12, leading=16, spaceBefore=8, spaceAfter=4))
+    s.add(ParagraphStyle(name="BodyVN", parent=s["Normal"],
+                         fontName=base_font, fontSize=11, leading=16))
+    s.add(ParagraphStyle(name="RefItem", parent=s["Normal"],
+                         fontName=base_font, fontSize=10.5, leading=15, leftIndent=12, spaceAfter=2))
+    s.add(ParagraphStyle(name="SmallGrey", parent=s["Normal"],
+                         fontName=base_font, fontSize=9, leading=12, textColor=colors.grey))
+    return s
 
-def _para(text, style):
-    return Paragraph(normalize_text(text).replace("\n","<br/>"), style)
+# ---------- PDF helpers (2 cột) ----------
+def draw_footer(canvas, doc):
+    canvas.saveState()
+    canvas.setFont("Times-Roman", 9)
+    canvas.setFillColor(colors.grey)
+    canvas.drawRightString(doc.pagesize[0]-doc.rightMargin, 20, f"{doc.page}")
+    canvas.restoreState()
 
-def build_pdf_story(ctx, styles):
+def p(txt, style):  # chuyển \n -> <br/>
+    return Paragraph(str(txt or "").replace("\n","<br/>"), style)
+
+def build_first_page(ctx, styles):
     story = []
-    meta = ctx.get("meta", {})
-    abstract = ctx.get("abstract", {}) or {}
-    sections = ctx.get("sections", {}) or {}
-
-    # Title page
-    story.append(_para(meta.get("title",""), styles["TitleVN"]))
-    if meta.get("subtitle"):
-        story.append(_para(meta.get("subtitle",""), styles["SubtitleVN"]))
-    date_txt = meta.get("date", "")
-    story.append(Spacer(1, 6))
+    m = ctx.get("meta", {})
+    abs_ = ctx.get("abstract", {}) or {}
+    # Title & metadata (full width)
+    story += [
+        p(m.get("title",""), styles["TitleVN"]),
+        p(m.get("subtitle",""), styles["SubtitleVN"]) if m.get("subtitle") else Spacer(1,2),
+        Spacer(1,6)
+    ]
     # Authors
-    authors_txt = []
-    for a in meta.get("authors", []) or []:
+    auth_lines = []
+    for a in m.get("authors") or []:
         nm = a.get("name","")
-        aff = a.get("affiliation","")
-        em = a.get("email","")
-        oc = a.get("orcid","")
-        line = nm
-        extras = []
-        if aff: extras.append(aff)
-        if em: extras.append(f"✉ {em}")
-        if oc: extras.append(f"ORCID: {oc}")
-        if extras: line += " — " + " | ".join(extras)
-        authors_txt.append(line)
-    if authors_txt:
-        story.append(_para("<br/>".join(authors_txt), styles["MetaVN"]))
-    if date_txt:
-        story.append(_para(normalize_text(date_txt), styles["MetaVN"]))
-    story.append(Spacer(1, 12))
+        extras = [x for x in [a.get("affiliation",""), f"✉ {a.get('email','')}" if a.get("email") else "", f"ORCID: {a.get('orcid','')}" if a.get("orcid") else ""] if x]
+        line = nm + (" — " + " | ".join(extras) if extras else "")
+        auth_lines.append(line)
+    if auth_lines:
+        story.append(p("<br/>".join(auth_lines), styles["MetaVN"]))
+    story.append(p(str(m.get("date","")), styles["SmallGrey"]))
+    story.append(Spacer(1,10))
+    # Abstract
+    story += [p("Tóm tắt", styles["H1"]), p(abs_.get("text",""), styles["BodyVN"])]
+    if abs_.get("keywords"):
+        story += [Spacer(1,4), p("<i>Từ khóa:</i> " + ", ".join(abs_["keywords"]), styles["BodyVN"])]
+    story += [Spacer(1,8)]
+    return story
 
-    # Abstract + Keywords
-    story.append(_para("<b>Tóm tắt</b>", styles["H1"]))
-    story.append(_para(abstract.get("text",""), styles["BodyVN"]))
-    keys = abstract.get("keywords") or []
-    if keys:
-        story.append(Spacer(1,6))
-        story.append(_para("<i>Từ khóa:</i> " + ", ".join(keys), styles["BodyVN"]))
-    story.append(Spacer(1, 10))
+def build_body_two_cols(ctx, styles):
+    S = []
+    sec = ctx.get("sections", {}) or {}
 
-    # Sections
-    def add_section(title, key):
-        content = sections.get(key,"")
-        if content:
-            story.append(_para(f"<b>{title}</b>", styles["H1"]))
-            story.append(_para(content, styles["BodyVN"]))
-            story.append(Spacer(1,6))
+    def add_block(h, key, hstyle="H1"):
+        if sec.get(key):
+            S.append(p(h, styles[hstyle])); S.append(p(sec.get(key,""), styles["BodyVN"])); S.append(Spacer(1,6))
 
-    add_section("1. Giới thiệu", "introduction")
-    add_section("2. Phương pháp (PRISMA / Systematic Review)", "methods")
-    if sections.get("prisma"):
-        story.append(_para("2.1 Sơ đồ PRISMA (mô tả ngắn)", styles["H2"]))
-        story.append(_para(sections.get("prisma",""), styles["BodyVN"]))
-        story.append(Spacer(1,6))
-    add_section("3. Kết quả", "results")
-    add_section("4. Thảo luận", "discussion")
-    add_section("5. Kết luận", "conclusion")
-    if sections.get("limitations"):
-        story.append(_para("Hạn chế", styles["H2"]))
-        story.append(_para(sections.get("limitations",""), styles["BodyVN"]))
-        story.append(Spacer(1,6))
+    add_block("1. Giới thiệu", "introduction")
+    add_block("2. Phương pháp (PRISMA / Systematic Review)", "methods")
+    if sec.get("prisma"):
+        S.append(p("2.1 Sơ đồ PRISMA (mô tả)", styles["H2"])); S.append(p(sec.get("prisma",""), styles["BodyVN"])); S.append(Spacer(1,6))
+    add_block("3. Kết quả", "results")
+    add_block("4. Thảo luận", "discussion")
+    add_block("5. Kết luận", "conclusion")
+    if sec.get("limitations"):
+        S.append(p("Hạn chế", styles["H2"])); S.append(p(sec.get("limitations",""), styles["BodyVN"])); S.append(Spacer(1,6))
 
-    # Other statements
-    def maybe_block(title, key):
+    # Statements
+    def opt_block(h, key):
         v = ctx.get(key, "")
         if v:
-            story.append(_para(f"<b>{title}</b>", styles["H1"]))
-            story.append(_para(v, styles["BodyVN"]))
-            story.append(Spacer(1,6))
-    maybe_block("Lời cảm ơn", "acknowledgments")
-    maybe_block("Công bố dữ liệu / Mã nguồn", "data_availability")
-    maybe_block("Đạo đức", "ethics")
-    maybe_block("Tài trợ", "funding")
-    maybe_block("Xung đột lợi ích", "conflicts_of_interest")
+            S.append(p(h, styles["H1"])); S.append(p(v, styles["BodyVN"])); S.append(Spacer(1,6))
+    opt_block("Lời cảm ơn", "acknowledgments")
+    opt_block("Công bố dữ liệu / Mã nguồn", "data_availability")
+    opt_block("Đạo đức", "ethics")
+    opt_block("Tài trợ", "funding")
+    opt_block("Xung đột lợi ích", "conflicts_of_interest")
 
     # References
-    refs = ctx.get("references", []) or []
+    refs = ctx.get("references") or []
     if refs:
-        story.append(_para("<b>Tài liệu tham khảo</b>", styles["H1"]))
+        S.append(p("Tài liệu tham khảo", styles["H1"]))
         for i, r in enumerate(refs, 1):
             title = (r.get("title","") or "").rstrip(".")
             authors = "; ".join([f"{a.get('family','')}, {a.get('given','')}" for a in r.get("authors",[]) if a])
             year = r.get("date","n.d.")
             src = r.get("container","")
             doi = r.get("doi","") or r.get("url","")
-            piece = f"{i}. {authors} ({year}). {title}. <i>{src}</i>."
-            if doi: piece += f" {doi}"
-            story.append(_para(piece, styles["RefItem"]))
-    return story
+            text = f"{i}. {authors} ({year}). {title}. <i>{src}</i>."
+            if doi: text += f" {doi}"
+            S.append(p(text, styles["RefItem"]))
+    return S
 
-def save_pdf(ctx, out_path: Path):
-    base_font = _register_fonts()
-    styles = _styles(base_font)
-    doc = SimpleDocTemplate(
-        str(out_path), pagesize=A4,
-        leftMargin=44, rightMargin=44, topMargin=56, bottomMargin=56
-    )
-    story = build_pdf_story(ctx, styles)
+def export_pdf_two_cols(ctx, out_path: Path):
+    base_font = register_fonts()
+    styles = make_styles(base_font)
+
+    doc = BaseDocTemplate(str(out_path), pagesize=A4,
+                          leftMargin=44, rightMargin=44, topMargin=56, bottomMargin=56)
+
+    # Frames: First page (full width), then 2 columns
+    frame_full = Frame(doc.leftMargin, doc.bottomMargin, doc.width, doc.height, id="full")
+    gap = 14
+    col_w = (doc.width - gap) / 2
+    frame_l = Frame(doc.leftMargin, doc.bottomMargin, col_w, doc.height, id="col1")
+    frame_r = Frame(doc.leftMargin + col_w + gap, doc.bottomMargin, col_w, doc.height, id="col2")
+
+    doc.addPageTemplates([
+        PageTemplate(id="First", frames=[frame_full], onPage=draw_footer),
+        PageTemplate(id="TwoCol", frames=[frame_l, frame_r], onPage=draw_footer),
+    ])
+
+    story = []
+    story += build_first_page(ctx, styles)
+    story += [NextPageTemplate("TwoCol"), PageBreak()]
+    story += build_body_two_cols(ctx, styles)
+
     doc.build(story)
 
-# ===================== Streamlit UI =====================
-
-st.set_page_config(page_title="Gemini → Sinh bài báo & Xuất PDF (IMRaD + PRISMA)", layout="wide")
-st.title("🧪 Gemini → Viết bài báo khoa học (đa tiêu đề) → Xuất PDF")
+# ---------- Streamlit UI ----------
+st.set_page_config(page_title="PhD-style Papers (IMRaD + PRISMA) → PDF 2 cột", layout="wide")
+st.title("🧪 Gemini → Viết bài học thuật kiểu 'tiến sỹ' → Xuất PDF 2 cột")
 
 with st.sidebar:
     st.header("Thiết lập")
-    # Secrets lấy sẵn nếu có
     default_key = ""
     try:
         if "GEMINI_API_KEY" in st.secrets:
@@ -351,33 +254,33 @@ with st.sidebar:
     except Exception:
         pass
     api_key = st.text_input("GEMINI_API_KEY", value=default_key, type="password")
-    model_name = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], index=0)
-    ref_count = st.number_input("Số tài liệu tham khảo (gợi ý)", min_value=5, max_value=60, value=20)
-    language = st.selectbox("Ngôn ngữ đầu ra", ["vi", "en"], index=0)
-    st.caption("Khuyên dùng Secrets trên Streamlit Cloud: Settings → Secrets → GEMINI_API_KEY")
+    model_name = st.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], index=0)
+    ref_count = st.number_input("Số tài liệu tham khảo (gợi ý)", min_value=8, max_value=80, value=25)
+    language = st.selectbox("Ngôn ngữ", ["vi", "en"], index=0)
+    st.caption("Bố cục PDF 2 cột (title/abstract full-width) lấy cảm hứng từ bài mẫu bạn gửi.")
 
 col1, col2 = st.columns([1,2])
-
 with col1:
-    st.subheader("1) Danh sách tiêu đề (mỗi dòng 1 tiêu đề)")
-    titles_text = st.text_area("Nhập tiêu đề...", height=200, placeholder="Ví dụ:\nTổng quan hệ thống về tăng trưởng xanh tại Việt Nam\nTác động của chuyển dịch năng lượng ở Đông Nam Á")
-    subtitle = st.text_input("Phụ đề (áp cho tất cả, có thể trống)", value="")
-    keywords = st.text_input("Từ khóa chung (phân tách bởi dấu phẩy)", value="tăng trưởng xanh, PRISMA, Việt Nam, tổng quan hệ thống")
+    st.subheader("1) Nhập tiêu đề (mỗi dòng 1 tiêu đề)")
+    titles_text = st.text_area("Tiêu đề...", height=180, placeholder="Ví dụ:\nTổng quan hệ thống về tăng trưởng xanh tại Việt Nam")
+    subtitle = st.text_input("Phụ đề (tuỳ chọn)")
+    keywords = st.text_input("Từ khóa chung (phân tách bởi dấu phẩy)",
+                             value="tăng trưởng xanh, PRISMA, Việt Nam, tổng quan hệ thống")
     review_type = st.selectbox("Loại bài", ["Systematic Review (PRISMA)", "Scoping Review", "Original Research"], index=0)
-    run_btn = st.button("🚀 Sinh bài báo & Xuất PDF")
+    run_btn = st.button("🚀 Sinh YAML & Xuất PDF 2 cột")
 
 with col2:
-    st.subheader("2) Xem nhanh YAML & Markdown")
+    st.subheader("2) Xem nhanh YAML")
     tabs_area = st.empty()
-    st.subheader("3) Tải kết quả")
-    zip_dl_area = st.empty()
+    st.subheader("3) Tải về")
+    zip_area = st.empty()
 
 if run_btn:
     titles = [t.strip() for t in (titles_text or "").splitlines() if t.strip()]
     if not genai:
         st.error("Chưa cài google-generativeai. Thêm vào requirements.txt và deploy lại.")
     elif not api_key:
-        st.error("Cần nhập GEMINI_API_KEY (Sidebar).")
+        st.error("Cần nhập GEMINI_API_KEY.")
     elif not titles:
         st.error("Cần ít nhất 1 tiêu đề.")
     else:
@@ -385,88 +288,49 @@ if run_btn:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(model_name)
 
-            sys_inst = (
-                "Bạn là trợ lý biên tập khoa học. Hãy xuất RA DUY NHẤT một YAML hợp lệ cho bài báo theo IMRaD + PRISMA. "
-                "TUYỆT ĐỐI KHÔNG dùng code fence, KHÔNG dùng ```yaml hay ``` bất kỳ. "
-                "Trả về các khóa bắt buộc: meta(title, subtitle, date, authors[]), abstract(text, keywords[]), "
-                "sections(introduction, methods, prisma, results, discussion, conclusion, limitations), acknowledgments, "
-                "data_availability, ethics, funding, conflicts_of_interest, references[]. "
-                "references: mỗi mục gồm type (journal_article|book|web_article|conference_paper), authors[family,given], "
-                "date (YYYY hoặc YYYY-MM hoặc YYYY-MM-DD), title, container, volume, issue, pages, doi hoặc url. "
-                "Ngôn ngữ phải đúng tham số 'language'."
-            )
-
-            # Mỗi tiêu đề sinh 1 YAML, render ra PDF + hiển thị YAML/MD
             tabs = st.tabs([f"Bài {i+1}" for i in range(len(titles))])
             zip_buf = io.BytesIO()
             with zipfile.ZipFile(zip_buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-                for idx, title in enumerate(titles):
-                    prompt = f"""
-Hãy viết YAML cho bài báo khoa học theo định dạng trên. Thông tin đầu vào:
-- title: "{title}"
-- subtitle: "{subtitle}"
-- desired_language: "{language}"
-- keywords: "{keywords}"
-- review_type: "{review_type}"
-- reference_count_hint: {int(ref_count)}
+                for i, title in enumerate(titles):
+                    sys_inst = phd_system_instruction()
+                    user_prompt = make_user_prompt(title, subtitle, language, keywords, review_type, ref_count)
 
-Yêu cầu nội dung:
-- Abstract ~ 200-300 từ.
-- Methods nêu rõ PICOS, nguồn dữ liệu, chiến lược truy vấn, tiêu chí đưa vào/loại ra, quy trình sàng lọc (PRISMA).
-- Results tổng hợp định lượng/định tính, có xu hướng theo năm và chủ đề.
-- Discussion nêu ý nghĩa, so sánh với nghiên cứu trước, hàm ý chính sách/thực tiễn.
-- Conclusion + Limitations rõ ràng.
-- Tạo {int(ref_count)} tài liệu tham khảo giả-lập hợp lý (không cần tồn tại thực), đúng cấu trúc trường yêu cầu.
-Chỉ trả về YAML thuần, không kèm markdown fences.
-                    """.strip()
-
-                    resp = model.generate_content([sys_inst, prompt])
+                    resp = model.generate_content([sys_inst, user_prompt])
                     raw_text = (getattr(resp, "text", None) or "").strip()
                     text = strip_code_fences(raw_text)
-
-                    # parse YAML
                     ctx = yaml.safe_load(text) or {}
-                    # ensure minimal meta
-                    ctx.setdefault("meta", {})
-                    ctx["meta"]["title"] = ctx["meta"].get("title") or title
-                    ctx["meta"]["subtitle"] = ctx["meta"].get("subtitle") or subtitle
-                    ctx["meta"]["date"] = ctx["meta"].get("date") or str(date.today())
+                    ensure_meta(ctx, title, subtitle)
 
-                    # Render Markdown demo
-                    md = fill_template(ctx, ensure_template())
-
-                    with tabs[idx]:
-                        st.caption(f"Tiêu đề: **{title}**")
-                        st.markdown("**YAML sinh ra**")
+                    # Show YAML & Export PDF
+                    with tabs[i]:
                         st.code(yaml.safe_dump(ctx, allow_unicode=True, sort_keys=False), language="yaml")
-                        st.markdown("**Xem nhanh Markdown**")
-                        st.markdown(md)
 
-                    # Save PDF
-                    pdf_name = f"paper_{idx+1}.pdf"
-                    pdf_path = OUTPUT_DIR / pdf_name
-                    save_pdf(ctx, pdf_path)
-
-                    # Add to zip
+                    pdf_name = f"paper_{i+1}.pdf"
+                    pdf_path = OUT_DIR / pdf_name
+                    export_pdf_two_cols(ctx, pdf_path)
                     zf.write(str(pdf_path), arcname=pdf_name)
 
             zip_buf.seek(0)
-            zip_dl_area.download_button(
+            zip_area.download_button(
                 "⬇️ Tải tất cả PDF (ZIP)",
                 data=zip_buf.read(),
-                file_name="papers.zip",
+                file_name="papers_phd_twocol.zip",
                 mime="application/zip"
             )
-            st.success("Đã sinh bài và xuất PDF cho tất cả tiêu đề!")
+            st.success("Đã sinh bài học thuật & xuất PDF 2 cột.")
         except Exception as e:
             st.error(f"Lỗi xử lý: {e}")
+            # Hiển thị raw để debug nếu YAML lỗi
+            try:
+                st.code(raw_text, language="yaml")
+            except Exception:
+                pass
 
-# --- Footer: hướng dẫn font ---
-with st.expander("⚠️ Lưu ý hiển thị tiếng Việt trong PDF"):
+# Gợi ý font để hiển thị tiếng Việt
+with st.expander("⚠️ Font tiếng Việt cho PDF"):
     st.markdown(
-        "- Để PDF hiển thị tiếng Việt chuẩn, hãy đặt font **NotoSerif** trong `assets/fonts/` với các file:\n"
+        "- Đặt các file font vào `assets/fonts/`:\n"
         "  - `NotoSerif-Regular.ttf`\n"
         "  - `NotoSerif-Bold.ttf`\n"
-        "  - (tuỳ chọn) `NotoSerif-Italic.ttf`\n"
-        "- Nếu thiếu font, app sẽ fallback **Times-Roman** (có thể lỗi dấu)."
+        "- Nếu thiếu, PDF sẽ fallback Times-Roman (có thể mất dấu)."
     )
