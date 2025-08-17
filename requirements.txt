@@ -1,6 +1,0 @@
-streamlit
-pandas
-numpy
-requests
-python-docx
-reportlab

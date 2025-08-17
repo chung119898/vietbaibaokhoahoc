@@ -1,0 +1,65 @@
+meta:
+  title: "Tổng quan hệ thống về tăng trưởng xanh tại Việt Nam"
+  subtitle: "Bài báo khoa học theo cấu trúc IMRaD"
+  date: "2025-08-17"
+  authors:
+    - name: "Hasumiki Yuna"
+      affiliation: "Khoa Kinh tế, Trường XYZ"
+      email: "yuna@example.com"
+      orcid: "0000-0000-0000-0000"
+
+abstract:
+  text: >
+    Mục tiêu của bài báo là hệ thống hóa bằng chứng thực nghiệm về tăng trưởng xanh
+    tại Việt Nam, đánh giá phương pháp nghiên cứu, chỉ số đo lường và tác động chính
+    sách. Nghiên cứu áp dụng quy trình PRISMA, tổng hợp định lượng/định tính từ
+    các nguồn Web of Science, Scopus, Google Scholar trong giai đoạn 2010–2025.
+  keywords: ["tăng trưởng xanh", "PRISMA", "Việt Nam", "tổng quan hệ thống"]
+
+sections:
+  introduction: >
+    Trình bày bối cảnh, khoảng trống nghiên cứu, đóng góp kỳ vọng; định nghĩa tăng trưởng xanh
+    và liên hệ tới chính sách quốc gia.
+  methods: >
+    Chi tiết tiêu chí PICOS; chiến lược truy vấn; cơ sở dữ liệu; quy trình sàng lọc 2 bước;
+    đánh giá chất lượng; phương pháp tổng hợp.
+  prisma: >
+    Tổng số bản ghi tìm được (n=?), loại bỏ trùng lặp (n=?), sàng lọc tiêu đề/tóm tắt (n=?),
+    đánh giá toàn văn (n=?), và số nghiên cứu đưa vào tổng hợp (n=?).
+  results: >
+    Tóm lược số liệu chính; bảng đặc điểm nghiên cứu; xu hướng theo năm; kết quả định lượng.
+  discussion: >
+    Diễn giải ý nghĩa, so sánh với nghiên cứu trước, hàm ý chính sách.
+  conclusion: >
+    Tóm lại đóng góp, khuyến nghị nghiên cứu tiếp theo, hạn chế.
+  limitations: >
+    Hạn chế về phạm vi dữ liệu, khác biệt phương pháp, nguy cơ thiên lệch ấn phẩm.
+
+acknowledgments: "Cảm ơn các đồng nghiệp và đơn vị tài trợ đã hỗ trợ nghiên cứu."
+data_availability: "Dữ liệu và mã nguồn được cung cấp kèm theo phụ lục hoặc kho lưu trữ công khai."
+ethics: "Không áp dụng/Đã tuân thủ các quy định đạo đức nghiên cứu phù hợp."
+funding: "Nghiên cứu được tài trợ bởi Quỹ ABC (Mã số: 1234)."
+conflicts_of_interest: "Tác giả tuyên bố không có xung đột lợi ích."
+
+references:
+  - type: "journal_article"
+    authors:
+      - family: "Nguyen"
+        given: "A. B."
+      - family: "Tran"
+        given: "C. D."
+    date: "2021-06-01"
+    title: "Measuring green growth in emerging economies"
+    container: "Journal of Sustainable Development"
+    volume: "15"
+    issue: "2"
+    pages: "100-118"
+    doi: "10.1234/jsd.2021.5678"
+  - type: "web_article"
+    authors:
+      - family: "World Bank"
+        given: ""
+    date: "2023"
+    title: "Green Growth Overview"
+    container: "World Bank"
+    url: "https://www.worldbank.org/en/topic/greengrowth"
