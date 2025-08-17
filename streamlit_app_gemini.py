@@ -9,6 +9,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 from jinja2 import Template
+import markdown
+import pdfkit
+import tempfile
 
 # ================== UI Config ==================
 st.set_page_config(page_title="Auto Paper (OpenAlex + Gemini)", layout="wide")
@@ -35,6 +38,7 @@ with st.sidebar:
     st.header("✍️ (Tuỳ chọn) Viết bằng Gemini")
     use_gemini = st.checkbox("Dùng Gemini để soạn bài?", True)
     gemini_model = st.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], 0)
+    paper_language = st.selectbox("Ngôn ngữ bài viết", ["Tiếng Việt", "English"], 0)  # Thêm dòng này
     author_name = st.text_input("Tác giả hiển thị", "Nhóm nghiên cứu")
     keywords = st.text_input("Từ khóa", "tăng trưởng xanh; bền vững; năng lượng tái tạo; số hoá")
     subtitle = st.text_input("Phụ đề", "Bài tổng quan hệ thống có trích dẫn học thuật")
@@ -235,7 +239,7 @@ def plot_top_venues(df, topk=10):
         plt.tight_layout()
     return fig
 
-MD_TEMPLATE = """---
+MD_TEMPLATE_VI = """---
 title: "{{ title }}"
 subtitle: "{{ subtitle }}"
 author:
@@ -293,9 +297,69 @@ _Chưa có nguồn hợp lệ._
 {% endif %}
 """
 
-SYSTEM_STYLE_INSTR = """Bạn là một nhà nghiên cứu (tiến sĩ) viết văn phong học thuật, mạch lạc, có trích dẫn theo dạng [#] đúng vị trí. Tuyệt đối không được bịa nguồn hay chèn trích dẫn không có trong danh mục 'CÁC NGUỒN HỢP LỆ'. Nếu không đủ bằng chứng, hãy nói rõ 'chưa đủ bằng chứng từ nguồn hợp lệ' thay vì suy đoán."""
+MD_TEMPLATE_EN = """---
+title: "{{ title }}"
+subtitle: "{{ subtitle }}"
+author:
+  - name: "{{ author }}"
+date: "{{ date }}"
+lang: en
+---
 
-SECTION_PROMPT = """
+# {{ title }}
+
+**Author:** {{ author }}
+
+**Keywords:** {{ keywords }}
+
+---
+
+## 1. Introduction
+{{ intro }}
+
+## 2. Methods (PRISMA / Systematic Review)
+{{ methods }}
+
+### 2.1 PRISMA Diagram (mermaid)
+```mermaid
+{{ prisma_mermaid }}
+```
+
+## 3. Results
+{{ results }}
+
+### 3.1 Publication trends by year
+![Publication trends](fig_publications_by_year.png)
+
+### 3.2 Top journals/sources
+![Top journals](fig_top_venues.png)
+
+## 4. Discussion
+{{ discussion }}
+
+## 5. Conclusion
+{{ conclusion }}
+
+### Limitations
+{{ limitations }}
+
+---
+
+## References
+{% if bibliography %}
+{% for src in bibliography -%}
+[{{ loop.index }}] {{ src }}
+{% endfor %}
+{% else %}
+_No valid sources._
+{% endif %}
+"""
+
+SYSTEM_STYLE_INSTR_VI = """Bạn là một nhà nghiên cứu (tiến sĩ) viết văn phong học thuật, mạch lạc, có trích dẫn theo dạng [#] đúng vị trí. Tuyệt đối không được bịa nguồn hay chèn trích dẫn không có trong danh mục 'CÁC NGUỒN HỢP LỆ'. Nếu không đủ bằng chứng, hãy nói rõ 'chưa đủ bằng chứng từ nguồn hợp lệ' thay vì suy đoán."""
+
+SYSTEM_STYLE_INSTR_EN = """You are a researcher (PhD) writing in an academic, coherent style with in-text citations in the form [#] at the correct positions. Absolutely do not fabricate sources or insert citations not present in the 'VALID SOURCES' list. If there is insufficient evidence, clearly state 'insufficient evidence from valid sources' instead of speculating."""
+
+SECTION_PROMPT_VI = """
 {system}
 
 CHỦ ĐỀ CHUNG: "{topic}"
@@ -313,6 +377,26 @@ YÊU CẦU:
 ĐỘ DÀI GỢI Ý: {length_hint} từ.
 
 BẮT ĐẦU VIẾT:
+"""
+
+SECTION_PROMPT_EN = """
+{system}
+
+MAIN TOPIC: "{topic}"
+
+VALID SOURCES (allowed to cite):
+{sources_bulleted}
+
+REQUIREMENTS:
+- Write the section: {section_title}
+- Language: English, academic, clear.
+- In-text citations in the form [#], with # matching the correct index in the above source list (absolutely no citations outside the list).
+- Do not repeat the section title.
+- Avoid generic statements; focus on evidence, main arguments, and “compare – contrast”.
+
+SUGGESTED LENGTH: {length_hint} words.
+
+START WRITING:
 """
 
 def write_with_gemini(model_name, prompt, max_tokens=1800):
@@ -441,6 +525,18 @@ D --> E[Full-text included: {prisma.get('included_fulltext', 0)}]
             sources_bulleted = make_sources_bulleted(sources)
             bibliography = make_bibliography(sources)
 
+            # Chọn template và prompt theo ngôn ngữ
+            if paper_language == "English":
+                MD_TEMPLATE = MD_TEMPLATE_EN
+                SYSTEM_STYLE_INSTR = SYSTEM_STYLE_INSTR_EN
+                SECTION_PROMPT = SECTION_PROMPT_EN
+                lang_code = "en"
+            else:
+                MD_TEMPLATE = MD_TEMPLATE_VI
+                SYSTEM_STYLE_INSTR = SYSTEM_STYLE_INSTR_VI
+                SECTION_PROMPT = SECTION_PROMPT_VI
+                lang_code = "vi"
+
             def section(title, length_hint):
                 prompt = SECTION_PROMPT.format(
                     system=SYSTEM_STYLE_INSTR,
@@ -452,16 +548,27 @@ D --> E[Full-text included: {prisma.get('included_fulltext', 0)}]
                 txt = write_with_gemini(gemini_model, prompt)
                 return enforce_citation_integrity(txt, len(bibliography))
 
-            with st.spinner("Gemini đang soạn bài..."):
-                intro = section("Giới thiệu: bối cảnh, khái niệm trọng tâm, tầm quan trọng và khoảng trống nghiên cứu", 450)
-                methods = section("Phương pháp: chiến lược tìm kiếm, tiêu chí PRISMA, cơ sở dữ liệu, cách đánh giá chất lượng nghiên cứu", 350)
-                results = section("Kết quả: các cụm chủ đề, khuynh hướng định lượng, phát hiện chính so với mục tiêu nghiên cứu", 400)
-                discussion = section("Thảo luận: diễn giải phát hiện, so sánh với tài liệu, hàm ý chính sách/thực hành, tranh luận học thuật", 450)
-                conclusion = section("Kết luận: tóm tắt đóng góp, hướng nghiên cứu tiếp theo", 220)
-                limitations = section("Hạn chế: dữ liệu, phương pháp, độ bao phủ; cách khắc phục trong tương lai", 200)
+            with st.spinner("Gemini đang soạn bài..." if lang_code=="vi" else "Gemini is generating the paper..."):
+                # Đặt tiêu đề section theo ngôn ngữ
+                if lang_code == "en":
+                    intro = section("Introduction: background, key concepts, importance, and research gap", 450)
+                    methods = section("Methods: search strategy, PRISMA criteria, databases, quality assessment", 350)
+                    results = section("Results: topic clusters, quantitative trends, main findings vs research objectives", 400)
+                    discussion = section("Discussion: interpret findings, compare with literature, policy/practice implications, academic debates", 450)
+                    conclusion = section("Conclusion: summary of contributions, future research directions", 220)
+                    limitations = section("Limitations: data, methods, coverage; how to address in the future", 200)
+                    paper_title = f"Systematic Review on {topic}"
+                else:
+                    intro = section("Giới thiệu: bối cảnh, khái niệm trọng tâm, tầm quan trọng và khoảng trống nghiên cứu", 450)
+                    methods = section("Phương pháp: chiến lược tìm kiếm, tiêu chí PRISMA, cơ sở dữ liệu, cách đánh giá chất lượng nghiên cứu", 350)
+                    results = section("Kết quả: các cụm chủ đề, khuynh hướng định lượng, phát hiện chính so với mục tiêu nghiên cứu", 400)
+                    discussion = section("Thảo luận: diễn giải phát hiện, so sánh với tài liệu, hàm ý chính sách/thực hành, tranh luận học thuật", 450)
+                    conclusion = section("Kết luận: tóm tắt đóng góp, hướng nghiên cứu tiếp theo", 220)
+                    limitations = section("Hạn chế: dữ liệu, phương pháp, độ bao phủ; cách khắc phục trong tương lai", 200)
+                    paper_title = f"Tổng quan hệ thống về {topic}"
 
                 context = {
-                    "title": f"Tổng quan hệ thống về {topic}",
+                    "title": paper_title,
                     "subtitle": subtitle,
                     "author": author_name,
                     "date": datetime.now().strftime("%Y-%m-%d"),
@@ -481,6 +588,18 @@ D --> E[Full-text included: {prisma.get('included_fulltext', 0)}]
             st.code(paper_md, language="markdown")
             st.download_button("⬇️ Tải paper.md", paper_md.encode("utf-8"), file_name="paper.md", mime="text/markdown")
 
+            # Thêm nút xuất PDF
+            if st.button("📄 Xuất PDF"):
+                with st.spinner("Đang chuyển sang PDF..."):
+                    html = markdown.markdown(paper_md, extensions=["tables"])
+                    # Lưu HTML tạm thời
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_html:
+                        tmp_html.write(html.encode("utf-8"))
+                        tmp_html.flush()
+                        pdf_file = tmp_html.name.replace(".html", ".pdf")
+                        pdfkit.from_file(tmp_html.name, pdf_file)
+                        with open(pdf_file, "rb") as f:
+                            st.download_button("⬇️ Tải paper.pdf", f, file_name="paper.pdf", mime="application/pdf")
         with st.expander("💡 Gợi ý xuất PDF (tuỳ chọn)"):
             st.markdown("""
 - Dùng **Pandoc** với filter Mermaid hoặc render Mermaid → PNG trước, rồi nhúng hình vào Markdown.
