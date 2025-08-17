@@ -1,4 +1,8 @@
-streamlit
-PyYAML
 google-generativeai
-reportlab
+requests
+pandas
+matplotlib
+tqdm
+tenacity
+jinja2
+google-search-results
