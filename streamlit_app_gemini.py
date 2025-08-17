@@ -33,7 +33,10 @@ with st.sidebar:
     author_name = st.text_input("Tác giả hiển thị", "Nhóm nghiên cứu")
     keywords = st.text_input("Từ khóa", "tăng trưởng xanh; bền vững; năng lượng tái tạo; số hoá")
     subtitle = st.text_input("Phụ đề", "Bài tổng quan hệ thống có trích dẫn học thuật")
-
+    # (tuỳ chọn) Nhập API key trực tiếp
+gemini_key_manual = st.text_input("GEMINI_API_KEY (tuỳ chọn)", type="password")
+if gemini_key_manual:
+    os.environ["GEMINI_API_KEY"] = gemini_key_manual
     st.divider()
     run = st.button("🚀 Tạo bài viết")
 
@@ -312,7 +315,7 @@ def write_with_gemini(model_name, prompt, max_tokens=1800):
     except Exception:
         st.error("Chưa cài `google-generativeai`. Chạy: pip install google-generativeai")
         return ""
-    api_key = os.getenv("GEMINI_API_KEY", "")
+api_key = st.secrets.get("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
     if not api_key:
         st.warning("Thiếu GEMINI_API_KEY → chỉ tạo dữ liệu & biểu đồ, không soạn văn bản.")
         return ""
