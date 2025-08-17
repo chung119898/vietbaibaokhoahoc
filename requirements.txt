@@ -1,8 +1,6 @@
-google-generativeai
+streamlit
 requests
 pandas
 matplotlib
-tqdm
-tenacity
 jinja2
-google-search-results
+google-generativeai
