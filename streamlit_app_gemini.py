@@ -1,4 +1,4 @@
-# streamlit_app_gemini.py (Phiên bản "Viết ngay" - Pure Generation)
+# streamlit_app_gemini.py (Phiên bản Fix lỗi 404 Model)
 import os
 import streamlit as st
 import google.generativeai as genai
@@ -6,17 +6,41 @@ import google.generativeai as genai
 # ================== Cấu hình giao diện ==================
 st.set_page_config(page_title="AI Paper Writer (Direct)", layout="wide")
 st.title("✍️ AI Scientist: Viết bài báo LaTeX từ chủ đề")
-st.caption("Công cụ này dùng Gemini để tự soạn thảo toàn bộ nội dung bài báo (bao gồm cả trích dẫn giả lập/tổng hợp) mà không cần tìm kiếm dữ liệu bên ngoài.")
 
 # ================== Sidebar ==================
 with st.sidebar:
     st.header("Cấu hình")
     api_key = st.text_input("GEMINI_API_KEY", type="password")
-    # Ưu tiên lấy từ biến môi trường nếu người dùng không nhập
     if not api_key:
         api_key = os.environ.get("GEMINI_API_KEY")
 
-    model_name = st.selectbox("Chọn Model", ["gemini-1.5-pro", "gemini-1.5-flash"], index=0)
+    # Cập nhật danh sách model để tránh lỗi 404
+    model_options = [
+        "gemini-1.5-flash",        # Bản nhẹ, nhanh, ít lỗi nhất
+        "gemini-1.5-pro",          # Bản mạnh nhất (có thể lỗi nếu acc chưa active)
+        "gemini-pro",              # Bản 1.0 ổn định (fallback)
+        "gemini-1.5-flash-latest", 
+        "gemini-1.5-pro-latest"
+    ]
+    model_name = st.selectbox("Chọn Model", model_options, index=0)
+    
+    # Nút kiểm tra xem tài khoản dùng được model nào
+    if st.button("🔍 Kiểm tra Model khả dụng"):
+        if not api_key:
+            st.error("Cần nhập API Key trước.")
+        else:
+            try:
+                genai.configure(api_key=api_key)
+                st.info("Đang kết nối lấy danh sách model...")
+                available_models = []
+                for m in genai.list_models():
+                    if 'generateContent' in m.supported_generation_methods:
+                        available_models.append(m.name)
+                st.success(f"Các model hoạt động: {available_models}")
+                st.caption("Hãy chọn tên model trong danh sách trên (bỏ chữ 'models/' ở đầu).")
+            except Exception as e:
+                st.error(f"Lỗi kết nối: {e}")
+
     language = st.selectbox("Ngôn ngữ bài viết", ["Tiếng Việt", "English"], 0)
     
     st.divider()
@@ -30,12 +54,9 @@ col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("1. Nhập chủ đề")
-    topic = st.text_area("Chủ đề bài báo (Càng chi tiết càng tốt)", height=150, 
-                        placeholder="Ví dụ: Ứng dụng Blockchain trong quản lý chuỗi cung ứng nông sản tại Việt Nam...")
-    
-    extra_instructions = st.text_area("Yêu cầu thêm (Tuỳ chọn)", 
-                                     placeholder="Ví dụ: Tập trung vào các thách thức pháp lý, trích dẫn ít nhất 10 nguồn...")
-    
+    topic = st.text_area("Chủ đề bài báo", height=150, 
+                        placeholder="Ví dụ: Ứng dụng Blockchain trong quản lý chuỗi cung ứng...")
+    extra_instructions = st.text_area("Yêu cầu thêm", placeholder="Ví dụ: 15 tài liệu tham khảo, tập trung vào Việt Nam...")
     generate_btn = st.button("🚀 Viết bài ngay", type="primary")
 
 with col2:
@@ -45,84 +66,61 @@ with col2:
 # ================== Logic xử lý ==================
 if generate_btn:
     if not api_key:
-        st.error("Vui lòng nhập GEMINI_API_KEY trong thanh bên trái.")
+        st.error("Vui lòng nhập GEMINI_API_KEY.")
         st.stop()
-    
     if not topic:
-        st.warning("Vui lòng nhập chủ đề bài báo.")
+        st.warning("Vui lòng nhập chủ đề.")
         st.stop()
 
-    # Cấu hình Gemini
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
 
-    # Tạo Prompt (Câu lệnh)
+    # Prompt xây dựng bài báo
     if language == "Tiếng Việt":
-        sys_prompt = "Bạn là một giáo sư, nhà nghiên cứu khoa học uy tín. Nhiệm vụ của bạn là viết một bài báo khoa học hoàn chỉnh định dạng LaTeX."
+        sys_prompt = "Bạn là giáo sư, nhà nghiên cứu uy tín. Hãy viết bài báo khoa học chuẩn LaTeX."
         user_req = f"""
-        Hãy viết một bài báo khoa học đầy đủ về chủ đề: "{topic}".
-        
-        THÔNG TIN:
-        - Tác giả: {author_name}
-        - Đơn vị: {affiliation}
-        - Loại bài: {paper_type}
-        - Yêu cầu thêm: {extra_instructions}
+        Viết bài báo khoa học về: "{topic}".
+        - Tác giả: {author_name} ({affiliation})
+        - Loại: {paper_type}
+        - Note: {extra_instructions}
 
-        CẤU TRÚC BẮT BUỘC (Sử dụng lệnh LaTeX chuẩn):
-        1. \\documentclass{{article}} và các gói cần thiết (bao gồm gói tiếng Việt nếu cần).
-        2. Tiêu đề, Tác giả, Abstract.
-        3. Các phần chính: Giới thiệu (Introduction), Phương pháp (Methods), Kết quả (Results), Thảo luận (Discussion), Kết luận (Conclusion).
-        4. Tài liệu tham khảo (References): Hãy TỰ TẠO ra danh sách 10-15 tài liệu tham khảo phù hợp nhất với chủ đề (có thể dựa trên kiến thức đã học hoặc giả lập hợp lý) và dùng lệnh \\cite{{...}} để trích dẫn chúng trong bài. Dùng môi trường \\begin{{thebibliography}}.
+        CẤU TRÚC LATEX BẮT BUỘC:
+        1. \\documentclass{{article}} (dùng gói 'vietnam' nếu cần).
+        2. Title, Abstract.
+        3. Sections: Introduction, Methods, Results, Discussion, Conclusion.
+        4. References: TỰ TẠO 10-15 trích dẫn giả lập hợp lý, dùng \\cite{{...}} trong bài và liệt kê trong \\begin{{thebibliography}}.
 
-        YÊU CẦU ĐẦU RA:
-        - Chỉ trả về duy nhất mã nguồn LaTeX (bắt đầu bằng \\documentclass và kết thúc bằng \\end{{document}}).
-        - Không trả về Markdown (```latex).
-        - Nội dung phải chuyên sâu, văn phong học thuật.
+        OUTPUT: Chỉ trả về mã nguồn LaTeX thuần túy (từ \\documentclass đến \\end{{document}}).
         """
     else:
-        sys_prompt = "You are a distinguished professor and scientist. Your task is to write a complete scientific paper in LaTeX format."
+        sys_prompt = "You are a professor. Write a scientific paper in LaTeX."
         user_req = f"""
-        Write a full scientific paper on the topic: "{topic}".
-        
-        DETAILS:
-        - Author: {author_name}
-        - Affiliation: {affiliation}
+        Topic: "{topic}".
+        - Author: {author_name} ({affiliation})
         - Type: {paper_type}
-        - Extra instructions: {extra_instructions}
+        - Note: {extra_instructions}
 
-        REQUIRED STRUCTURE (Use standard LaTeX commands):
-        1. \\documentclass{{article}} and necessary packages.
-        2. Title, Author, Abstract.
-        3. Main sections: Introduction, Methods, Results, Discussion, Conclusion.
-        4. References: GENERATE 10-15 relevant citations (based on your internal knowledge) and cite them in the text using \\cite{{...}}. Use the \\begin{{thebibliography}} environment.
+        REQUIRED LATEX STRUCTURE:
+        1. \\documentclass{{article}}.
+        2. Title, Abstract.
+        3. Sections: Introduction, Methods, Results, Discussion, Conclusion.
+        4. References: GENERATE 10-15 plausible citations, use \\cite{{...}} in text, list in \\begin{{thebibliography}}.
 
-        OUTPUT REQUIREMENT:
-        - Return ONLY raw LaTeX code (starting with \\documentclass and ending with \\end{{document}}).
-        - Do not use Markdown fences.
-        - Ensure academic tone and depth.
+        OUTPUT: Return ONLY raw LaTeX code.
         """
 
-    # Gọi Gemini
-    with st.spinner("Gemini đang viết bài... (Quá trình này mất khoảng 30-60 giây)"):
+    with st.spinner(f"Đang dùng model {model_name} để viết..."):
         try:
             response = model.generate_content([sys_prompt, user_req])
             tex_content = response.text
-            
-            # Làm sạch nếu Gemini lỡ thêm markdown fences
+            # Làm sạch code
             tex_content = tex_content.replace("```latex", "").replace("```", "").strip()
             
-            # Hiển thị kết quả
             latex_output.code(tex_content, language="latex")
-            
-            # Nút tải xuống
-            st.download_button(
-                label="⬇️ Tải file paper.tex",
-                data=tex_content,
-                file_name="paper.tex",
-                mime="application/x-tex"
-            )
-            
-            st.success("Đã viết xong! Bạn có thể copy code trên hoặc tải file .tex về để biên dịch.")
+            st.download_button("⬇️ Tải file paper.tex", tex_content, "paper.tex", "application/x-tex")
+            st.success("Hoàn tất!")
             
         except Exception as e:
-            st.error(f"Đã xảy ra lỗi: {e}")
+            st.error(f"Lỗi API: {e}")
+            if "404" in str(e):
+                st.warning("Gợi ý: Hãy thử chọn model khác (ví dụ 'gemini-1.5-flash' hoặc 'gemini-pro') ở thanh bên trái.")
