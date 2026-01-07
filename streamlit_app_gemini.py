@@ -310,7 +310,7 @@ if run:
                     "intro": "Giới thiệu", "methods": "Phương pháp nghiên cứu",
                     "results": "Kết quả", "discussion": "Thảo luận", "conclusion": "Kết luận"
                 }
-                system_prompt = f"""
+                system_prompt = rf"""
                 Bạn là một nhà nghiên cứu khoa học viết bài bằng tiếng Việt chuẩn mực. 
                 Nhiệm vụ: Viết một phần của bài báo khoa học về chủ đề: "{topic}".
                 Yêu cầu quan trọng:
