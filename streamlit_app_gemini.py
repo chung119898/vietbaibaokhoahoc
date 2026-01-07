@@ -1,4 +1,4 @@
-# streamlit_app_gemini_fixed_indent.py
+# streamlit_app_gemini.py (LaTeX Version)
 import os
 import re
 from datetime import datetime
@@ -9,115 +9,79 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
 from jinja2 import Template
-import markdown
-import pdfkit
-import tempfile
+# import pdfkit # Không cần pdfkit nữa vì ta xuất ra .tex
 
 # ================== UI Config ==================
-st.set_page_config(page_title="Auto Paper (OpenAlex + Gemini)", layout="wide")
-st.title("🧪 Auto Paper: OpenAlex → (tùy chọn) Gemini viết bài")
+st.set_page_config(page_title="Auto Paper (OpenAlex + Gemini -> LaTeX)", layout="wide")
+st.title("🧪 Auto Paper: OpenAlex → Gemini → LaTeX (.tex)")
 
 with st.sidebar:
     st.header("⚙️ Cấu hình tìm kiếm (OpenAlex)")
-    topic = st.text_input("Chủ đề", "tăng trưởng xanh và chuyển dịch năng lượng")
-    year_range = st.text_input("Khoảng năm (YYYY-YYYY)", "2000-2025")
-    per_page = st.number_input("Số mục mỗi trang", 10, 200, 100)
-    max_pages = st.number_input("Số trang tối đa", 1, 20, 8)
-    max_sources = st.number_input("Giới hạn nguồn đầu ra", 10, 500, 100)
-    verify_doi = st.checkbox("Xác thực DOI (HEAD tới doi.org, có thể chậm)", False)
-    loosen_types = st.checkbox("Nới lỏng loại tài liệu (journal|proceedings|report|book-chapter)", True)
+    topic = st.text_input("Chủ đề (VD: Ứng dụng AI trong y tế)", "Ứng dụng AI trong chẩn đoán hình ảnh")
+    year_range = st.text_input("Khoảng năm (YYYY-YYYY)", "2018-2025")
+    per_page = st.number_input("Số mục tìm kiếm mỗi trang", 10, 200, 50)
+    max_pages = st.number_input("Số trang tối đa", 1, 20, 2)
+    max_sources = st.number_input("Giới hạn nguồn đầu ra", 5, 100, 20)
     auto_expand_vi = st.checkbox("Tự mở rộng từ khoá VI→EN", True)
-    show_debug = st.checkbox("Hiển thị URL/meta truy vấn", False)
 
     st.subheader("🔐 Gemini API key")
-    gemini_key_manual = st.text_input("GEMINI_API_KEY (tuỳ chọn)", type="password")
+    gemini_key_manual = st.text_input("GEMINI_API_KEY", type="password")
     if gemini_key_manual:
         os.environ["GEMINI_API_KEY"] = gemini_key_manual
 
     st.divider()
-    st.header("✍️ (Tuỳ chọn) Viết bằng Gemini")
-    use_gemini = st.checkbox("Dùng Gemini để soạn bài?", True)
-    gemini_model = st.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], 0)
-    paper_language = st.selectbox("Ngôn ngữ bài viết", ["Tiếng Việt", "English"], 0)  # Thêm dòng này
-    author_name = st.text_input("Tác giả hiển thị", "Nhóm nghiên cứu")
-    keywords = st.text_input("Từ khóa", "tăng trưởng xanh; bền vững; năng lượng tái tạo; số hoá")
-    subtitle = st.text_input("Phụ đề", "Bài tổng quan hệ thống có trích dẫn học thuật")
-
+    st.header("✍️ Cấu hình bài báo")
+    use_gemini = st.checkbox("Dùng Gemini viết nội dung?", True)
+    gemini_model = st.selectbox("Model", ["gemini-1.5-flash", "gemini-1.5-pro"], 0)
+    paper_language = st.selectbox("Ngôn ngữ bài viết", ["Tiếng Việt", "English"], 0)
+    author_name = st.text_input("Tác giả", "Nguyen Van A")
+    affiliation = st.text_input("Đơn vị công tác", "Đại học Bách Khoa Hà Nội")
+    
     st.divider()
-    run = st.button("🚀 Tạo bài viết")
+    run = st.button("🚀 Tạo bài báo LaTeX")
 
 # ================== Helpers ==================
 def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s or "").strip()
 
 def year_from_date(s):
-    if not s:
-        return None
-    try:
-        return int(str(s)[:4])
-    except Exception:
-        return None
+    if not s: return None
+    try: return int(str(s)[:4])
+    except: return None
 
 def doi_url(doi):
-    if not doi:
-        return None
+    if not doi: return None
     doi = doi.lower().replace("https://doi.org/", "").replace("http://doi.org/", "").strip()
     return f"https://doi.org/{doi}"
-
-def verify_doi_head(doi: str, timeout=8) -> bool:
-    if not doi:
-        return False
-    try:
-        r = requests.head(doi_url(doi), allow_redirects=True, timeout=timeout)
-        return r.status_code < 400
-    except Exception:
-        return False
 
 def normalize_author_list(authors):
     if isinstance(authors, list):
         out = []
         for a in authors:
-            if isinstance(a, str):
-                out.append(a)
+            if isinstance(a, str): out.append(a)
             elif isinstance(a, dict):
                 name = a.get("name") or (a.get("author") or {}).get("display_name")
-                if name:
-                    out.append(name)
+                if name: out.append(name)
         return out
     return []
 
-def reconstruct_openalex_abstract(inv):
-    """OpenAlex có abstract_inverted_index → ghép lại."""
-    if not isinstance(inv, dict) or not inv:
-        return ""
-    positions = []
-    for word, idxs in inv.items():
-        for i in idxs:
-            positions.append((i, word))
-    positions.sort()
-    return " ".join(w for _, w in positions)
-
 def expand_query_vi_to_en(q: str) -> str:
+    # Hàm đơn giản mở rộng từ khóa tiếng Việt sang tiếng Anh để tìm trên OpenAlex tốt hơn
     ql = q.lower()
     extras = []
-    if "tăng trưởng xanh" in ql or "green growth" in ql:
-        extras += ["green growth", "green economy", "sustainable growth"]
-    if "chuyển dịch năng lượng" in ql or "energy transition" in ql:
-        extras += ["energy transition", "decarbonization", "low-carbon transition", "renewable energy transition"]
-    if "kinh tế xanh" in ql or "green economy" in ql:
-        extras += ["green economy", "circular economy", "sustainable economy"]
-    if "phát thải" in ql or "carbon" in ql:
-        extras += ["carbon emissions", "emission reduction", "net zero", "carbon neutrality"]
+    if "ai" in ql or "trí tuệ nhân tạo" in ql: extras += ["artificial intelligence", "deep learning", "machine learning"]
+    if "y tế" in ql or "chẩn đoán" in ql: extras += ["medical imaging", "healthcare", "diagnosis"]
+    if "việt nam" in ql: extras += ["Vietnam", "developing countries"]
     parts = [q] + [e for e in extras if e not in q]
     return " ".join(parts)
 
 @st.cache_data(show_spinner=False)
-def openalex_search(topic, years, per_page=50, max_pages=3, loosen_types=True, auto_expand_vi=True, show_debug=False):
+def openalex_search(topic, years, per_page=50, max_pages=2, auto_expand_vi=True):
     base = "https://api.openalex.org/works"
     search_q = expand_query_vi_to_en(topic) if auto_expand_vi else topic
     params = {
         "search": search_q,
-        "filter": [],
+        "filter": ["type:journal-article|proceedings-article"], # Chỉ lấy bài báo tạp chí/hội nghị
         "per_page": per_page,
         "sort": "relevance_score:desc"
     }
@@ -126,486 +90,308 @@ def openalex_search(topic, years, per_page=50, max_pages=3, loosen_types=True, a
             start, end = years.split("-")
             params["filter"].append(f"from_publication_date:{start}-01-01")
             params["filter"].append(f"to_publication_date:{end}-12-31")
-        except ValueError:
-            pass
-    types = "journal-article|proceedings-article|report|book-chapter" if loosen_types else "journal-article"
-    params["filter"].append(f"type:{types}")
+        except: pass
+    
     params["filter"] = ",".join(params["filter"])
-
+    
     out = []
     cursor = "*"
     for _ in range(max_pages):
         q = params.copy()
         q["cursor"] = cursor
-        url = f"{base}?{urlencode(q)}"
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
-        data = r.json()
-        if show_debug:
-            st.caption(f"🔎 OpenAlex URL: {url}")
-            st.caption(f"📦 meta: {data.get('meta', {})}")
-        for it in data.get("results", []):
-            title = clean_text(it.get("title"))
-            abstract = clean_text(it.get("abstract")) if it.get("abstract") else reconstruct_openalex_abstract(it.get("abstract_inverted_index"))
-            doi = it.get("doi")
-            primary_location = it.get("primary_location") or {}
-            landing = primary_location.get("landing_page_url")
-            oa_url = primary_location.get("pdf_url")
-            year = year_from_date(it.get("publication_year") or it.get("publication_date"))
-            venue = (it.get("host_venue") or {}).get("display_name")
-            authors = []
-            for au in it.get("authorships", []):
-                aname = (au.get("author") or {}).get("display_name")
-                if aname:
-                    authors.append(aname)
-            out.append({
-                "id": it.get("id"),
-                "title": title,
-                "abstract": abstract,
-                "doi": doi,
-                "url": landing,
-                "oa_pdf_url": oa_url,
-                "year": year,
-                "venue": venue,
-                "authors": authors
-            })
-        cursor = (data.get("meta") or {}).get("next_cursor")
-        if not cursor:
+        try:
+            r = requests.get(base, params=q, timeout=30)
+            r.raise_for_status()
+            data = r.json()
+            results = data.get("results", [])
+            for it in results:
+                # Lấy thông tin cơ bản
+                title = clean_text(it.get("title"))
+                abstract = ""
+                # Xử lý abstract inverted index của OpenAlex
+                inv = it.get("abstract_inverted_index")
+                if inv:
+                    positions = []
+                    for word, idxs in inv.items():
+                        for i in idxs: positions.append((i, word))
+                    positions.sort()
+                    abstract = " ".join(w for _, w in positions)
+                
+                doi = it.get("doi")
+                year = year_from_date(it.get("publication_year"))
+                venue = (it.get("host_venue") or {}).get("display_name")
+                authors = []
+                for au in it.get("authorships", []):
+                    aname = (au.get("author") or {}).get("display_name")
+                    if aname: authors.append(aname)
+                
+                if title and year:
+                    out.append({
+                        "id": it.get("id"),
+                        "title": title,
+                        "abstract": abstract,
+                        "doi": doi,
+                        "year": year,
+                        "venue": venue,
+                        "authors": authors,
+                        "cited_by_count": it.get("cited_by_count", 0)
+                    })
+            cursor = (data.get("meta") or {}).get("next_cursor")
+            if not cursor: break
+        except Exception as e:
+            st.error(f"Lỗi kết nối OpenAlex: {e}")
             break
     return out
 
-def has_valid_url(d):
-    for k in ["oa_pdf_url", "url", "landing_page"]:
-        if d.get(k):
-            return True
-    return False
+# --- Tạo BibTeX và danh sách nguồn ---
+def generate_bibtex_key(source, index):
+    # Tạo key dạng: AuthorYear (vd: Nguyen2023)
+    if source.get("authors"):
+        last_name = source["authors"][0].split()[-1]
+        last_name = re.sub(r"[^a-zA-Z]", "", last_name) # Chỉ giữ chữ cái
+    else:
+        last_name = "Unknown"
+    return f"{last_name}{source.get('year') or 'nd'}_{index}"
 
-def make_bibliography(sources):
-    out = []
-    for s in sources:
-        auths = normalize_author_list(s.get("authors"))
-        auth_str = "; ".join(auths) if auths else "N/A"
-        year = s.get("year") or "n.d."
-        title = s.get("title") or "Untitled"
-        ven = s.get("venue") or ""
-        doi = s.get("doi")
-        link = doi_url(doi) if doi else (s.get("url") or s.get("oa_pdf_url") or "")
-        out.append(f"{auth_str} ({year}). {title}. {ven}. {link}")
-    return out
+def make_bibtex_entries(sources):
+    # Tạo nội dung cho môi trường thebibliography hoặc file .bib
+    entries = []
+    keys = []
+    for i, s in enumerate(sources, 1):
+        key = generate_bibtex_key(s, i)
+        keys.append(key)
+        
+        # Định dạng đơn giản cho \bibitem
+        authors = " and ".join(s.get("authors", []))
+        title = s.get("title", "")
+        venue = s.get("venue", "")
+        year = s.get("year", "")
+        doi = s.get("doi", "").replace("https://doi.org/", "")
+        
+        # Tạo entry dạng \bibitem{key} Author, Title, Venue, Year.
+        entry = f"\\bibitem{{{key}}} {authors}. ``{title}''. \\textit{{{venue}}}, {year}. DOI: {doi}."
+        entries.append(entry)
+    return entries, keys
 
-def make_sources_bulleted(sources):
+def make_sources_bulleted(sources, keys):
     lines = []
-    for i, s in enumerate(sources, start=1):
-        title = s.get("title") or "(no title)"
+    for i, s in enumerate(sources):
+        title = s.get("title")
         year = s.get("year")
-        auths = ", ".join(normalize_author_list(s.get("authors")))
-        ven = s.get("venue") or ""
-        doi = s.get("doi")
-        link = doi_url(doi) if doi else (s.get("url") or s.get("oa_pdf_url") or "")
-        lines.append(f"[{i}] {auths} ({year}). {title}. {ven}. {link}".strip())
+        key = keys[i] # Key BibTeX tương ứng
+        lines.append(f"[{i+1}] (Cite Key: {key}) {title} ({year})")
     return "\n".join(lines)
 
-def enforce_citation_integrity(text, n_sources):
-    used = set(int(m.group(1)) for m in re.finditer(r"\[(\d+)\]", text))
-    invalid = [i for i in used if i < 1 or i > n_sources]
-    fixed = text
-    for bad in sorted(invalid, reverse=True):
-        fixed = re.sub(rf"\[{bad}\]", "", fixed)
-    return fixed
-
+# --- Xử lý đồ thị ---
 def plot_publications_by_year(df):
-    fig = plt.figure()
+    fig = plt.figure(figsize=(6, 4))
     counts = df["year"].dropna().astype(int).value_counts().sort_index()
-    if counts.empty:
-        plt.title("Không đủ dữ liệu năm")
-    else:
-        counts.plot(kind="bar")
-        plt.title("Số bài công bố theo năm")
-        plt.xlabel("Năm")
-        plt.ylabel("Số bài")
+    if not counts.empty:
+        counts.plot(kind="bar", color="teal")
+        plt.title("Publications per Year")
+        plt.xlabel("Year")
+        plt.ylabel("Count")
         plt.tight_layout()
     return fig
 
-def plot_top_venues(df, topk=10):
-    fig = plt.figure()
-    vc = df["venue"].dropna().apply(lambda s: s.strip()).value_counts().head(topk)
-    if vc.empty:
-        plt.title("Không đủ dữ liệu tạp chí")
-    else:
-        vc.plot(kind="barh")
-        plt.title(f"Top {topk} tạp chí/nguồn")
-        plt.xlabel("Số bài")
-        plt.ylabel("Tạp chí/Nguồn")
-        plt.tight_layout()
-    return fig
-
-MD_TEMPLATE_VI = """---
-title: "{{ title }}"
-subtitle: "{{ subtitle }}"
-author:
-  - name: "{{ author }}"
-date: "{{ date }}"
-lang: vi
----
-
-# {{ title }}
-
-**Tác giả:** {{ author }}
-
-**Từ khóa:** {{ keywords }}
-
----
-
-## 1. Giới thiệu
-{{ intro }}
-
-## 2. Phương pháp (PRISMA / Systematic Review)
-{{ methods }}
-
-### 2.1 Sơ đồ PRISMA (mermaid)
-```mermaid
-{{ prisma_mermaid }}
-```
-
-## 3. Kết quả
-{{ results }}
-
-### 3.1 Xu hướng công bố theo năm
-![Xu hướng công bố](fig_publications_by_year.png)
-
-### 3.2 Top tạp chí/nguồn
-![Top tạp chí](fig_top_venues.png)
-
-## 4. Thảo luận
-{{ discussion }}
-
-## 5. Kết luận
-{{ conclusion }}
-
-### Hạn chế
-{{ limitations }}
-
----
-
-## Tài liệu tham khảo
-{% if bibliography %}
-{% for src in bibliography -%}
-[{{ loop.index }}] {{ src }}
-{% endfor %}
-{% else %}
-_Chưa có nguồn hợp lệ._
-{% endif %}
-"""
-
-MD_TEMPLATE_EN = """---
-title: "{{ title }}"
-subtitle: "{{ subtitle }}"
-author:
-  - name: "{{ author }}"
-date: "{{ date }}"
-lang: en
----
-
-# {{ title }}
-
-**Author:** {{ author }}
-
-**Keywords:** {{ keywords }}
-
----
-
-## 1. Introduction
-{{ intro }}
-
-## 2. Methods (PRISMA / Systematic Review)
-{{ methods }}
-
-### 2.1 PRISMA Diagram (mermaid)
-```mermaid
-{{ prisma_mermaid }}
-```
-
-## 3. Results
-{{ results }}
-
-### 3.1 Publication trends by year
-![Publication trends](fig_publications_by_year.png)
-
-### 3.2 Top journals/sources
-![Top journals](fig_top_venues.png)
-
-## 4. Discussion
-{{ discussion }}
-
-## 5. Conclusion
-{{ conclusion }}
-
-### Limitations
-{{ limitations }}
-
----
-
-## References
-{% if bibliography %}
-{% for src in bibliography -%}
-[{{ loop.index }}] {{ src }}
-{% endfor %}
-{% else %}
-_No valid sources._
-{% endif %}
-"""
-
-SYSTEM_STYLE_INSTR_VI = """Bạn là một nhà nghiên cứu (tiến sĩ) viết văn phong học thuật, mạch lạc, có trích dẫn theo dạng [#] đúng vị trí. Tuyệt đối không được bịa nguồn hay chèn trích dẫn không có trong danh mục 'CÁC NGUỒN HỢP LỆ'. Nếu không đủ bằng chứng, hãy nói rõ 'chưa đủ bằng chứng từ nguồn hợp lệ' thay vì suy đoán."""
-
-SYSTEM_STYLE_INSTR_EN = """You are a researcher (PhD) writing in an academic, coherent style with in-text citations in the form [#] at the correct positions. Absolutely do not fabricate sources or insert citations not present in the 'VALID SOURCES' list. If there is insufficient evidence, clearly state 'insufficient evidence from valid sources' instead of speculating."""
-
-SECTION_PROMPT_VI = """
-{system}
-
-CHỦ ĐỀ CHUNG: "{topic}"
-
-CÁC NGUỒN HỢP LỆ (được phép trích dẫn):
-{sources_bulleted}
-
-YÊU CẦU:
-- Viết phần: {section_title}
-- Ngôn ngữ: tiếng Việt, chuẩn học thuật, rõ ràng.
-- Dẫn nguồn tại chỗ theo dạng [#], với # là số thứ tự đúng của danh mục nguồn ở trên (tuyệt đối không trích dẫn ngoài danh mục).
-- Không lặp lại tiêu đề.
-- Tránh sáo rỗng; tập trung vào bằng chứng, tranh luận chính và “so sánh – đối chiếu”.
-
-ĐỘ DÀI GỢI Ý: {length_hint} từ.
-
-BẮT ĐẦU VIẾT:
-"""
-
-SECTION_PROMPT_EN = """
-{system}
-
-MAIN TOPIC: "{topic}"
-
-VALID SOURCES (allowed to cite):
-{sources_bulleted}
-
-REQUIREMENTS:
-- Write the section: {section_title}
-- Language: English, academic, clear.
-- In-text citations in the form [#], with # matching the correct index in the above source list (absolutely no citations outside the list).
-- Do not repeat the section title.
-- Avoid generic statements; focus on evidence, main arguments, and “compare – contrast”.
-
-SUGGESTED LENGTH: {length_hint} words.
-
-START WRITING:
-"""
-
-def write_with_gemini(model_name, prompt, max_tokens=1800):
+# --- Gemini setup ---
+def write_with_gemini(model_name, prompt):
     try:
         import google.generativeai as genai
-    except Exception:
-        st.error("Chưa cài `google-generativeai`. Chạy: pip install google-generativeai")
-        return ""
-    api_key = st.secrets.get("GEMINI_API_KEY", "") or os.getenv("GEMINI_API_KEY", "")
-    if not api_key:
-        st.warning("Thiếu GEMINI_API_KEY → chỉ tạo dữ liệu & biểu đồ, không soạn văn bản.")
-        return ""
+    except:
+        return "Error: Missing google-generativeai lib."
+    
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key: return "Error: Missing API Key."
+    
     genai.configure(api_key=api_key)
+    model = genai.GenerativeModel(model_name)
     try:
-        model = genai.GenerativeModel(model_name)
-        resp = model.generate_content(
-            prompt,
-            generation_config={"temperature": 0.4, "max_output_tokens": max_tokens}
-        )
-        return resp.text or ""
+        resp = model.generate_content(prompt)
+        return resp.text
     except Exception as e:
-        st.error(f"Lỗi Gemini: {e}")
-        return ""
+        return f"% Error generating content: {e}"
 
-# ================== Main flow ==================
+# --- LATEX TEMPLATE ---
+LATEX_TEMPLATE = r"""
+\documentclass[12pt, a4paper]{article}
+\usepackage[utf8]{inputenc}
+{% if lang == 'vi' %}
+\usepackage[utf8]{vietnam} % Gói hỗ trợ tiếng Việt
+{% endif %}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{geometry}
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+\title{\textbf{ {{ title }} }}
+\author{ {{ author }} \\ \small {{ affiliation }} }
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+{{ abstract_content }}
+\end{abstract}
+
+\section{ {{ intro_title }} }
+{{ intro_content }}
+
+\section{ {{ methods_title }} }
+{{ methods_content }}
+
+\section{ {{ results_title }} }
+{{ results_content }}
+
+\begin{figure}[h!]
+    \centering
+    \includegraphics[width=0.8\textwidth]{fig_publications_by_year.png}
+    \caption{Trend of publications over the years.}
+    \label{fig:trend}
+\end{figure}
+
+\section{ {{ discussion_title }} }
+{{ discussion_content }}
+
+\section{ {{ conclusion_title }} }
+{{ conclusion_content }}
+
+% Tự động chèn tài liệu tham khảo
+\begin{thebibliography}{99}
+{% for item in bib_entries %}
+{{ item }}
+{% endfor %}
+\end{thebibliography}
+
+\end{document}
+"""
+
+# ================== Main Flow ==================
 colL, colR = st.columns([1, 1])
 
 if run:
-    with st.spinner("Đang tìm trên OpenAlex..."):
-        try:
-            works = openalex_search(
-                topic, year_range,
-                per_page=int(per_page),
-                max_pages=int(max_pages),
-                loosen_types=loosen_types,
-                auto_expand_vi=auto_expand_vi,
-                show_debug=show_debug
-            )
-        except Exception as e:
-            st.error(f"Lỗi OpenAlex: {e}")
-            works = []
-
-    prisma = {"initial": len(works)}
-
-    # Clean + validate
-    clean = []
-    seen_titles = set()
-    for w in works:
-        title_l = (w.get("title") or "").strip().lower()
-        if not title_l or title_l in seen_titles:
-            continue
-        seen_titles.add(title_l)
-
-        ok = False
-        doi = w.get("doi")
-        if verify_doi and doi and verify_doi_head(doi):
-            ok = True
-        elif has_valid_url(w) or doi:
-            ok = True
-
-        if ok:
-            y = w.get("year")
-            if isinstance(y, str) and y.isdigit():
-                y = int(y)
-            w["year"] = y
-            clean.append(w)
-
-    prisma["deduped"] = len(clean)
-
-    # Title screening
-    topic_tokens = [t.strip().lower() for t in re.split(r"[;,\s]\s*", topic) if len(t.strip()) > 2]
-    title_keep = []
-    for w in clean:
-        t = (w.get("title") or "").lower()
-        if any(tok in t for tok in topic_tokens):
-            title_keep.append(w)
-    if len(title_keep) < max(10, int(0.3*len(clean))):
-        title_keep = clean
-    prisma["screened_title"] = len(title_keep)
-
-    # Abstract screening
-    abs_keep = []
-    for w in title_keep:
-        ab = (w.get("abstract") or "").lower()
-        if ab:
-            if any(tok in ab for tok in topic_tokens):
-                abs_keep.append(w)
-        else:
-            abs_keep.append(w)
-    prisma["screened_abstract"] = len(abs_keep)
-
-    # Limit sources
-    sources = abs_keep[: int(max_sources)]
-    prisma["included_fulltext"] = len(sources)
-
-    if sources:
-        df = pd.DataFrame(sources)
-        st.subheader("📚 Nguồn thu thập được (đã lọc)")
-        st.dataframe(df[["title","year","venue","doi","url","oa_pdf_url"]], use_container_width=True, height=350)
-
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Tải sources.csv", csv, "sources.csv", "text/csv")
-
-        with colL:
-            st.subheader("📈 Xu hướng công bố theo năm")
-            fig1 = plot_publications_by_year(df)
-            st.pyplot(fig1, use_container_width=True)
-
-        with colR:
-            st.subheader("🏷️ Top tạp chí/nguồn")
-            fig2 = plot_top_venues(df, topk=10)
-            st.pyplot(fig2, use_container_width=True)
-
-        st.subheader("🧭 PRISMA (Mermaid code)")
-        prisma_mermaid = f"""flowchart TB
-A[Records identified: {prisma.get('initial', 0)}] --> B[After deduplication: {prisma.get('deduped', 0)}]
-B --> C[Title screening included: {prisma.get('screened_title', 0)}]
-C --> D[Abstract screening included: {prisma.get('screened_abstract', 0)}]
-D --> E[Full-text included: {prisma.get('included_fulltext', 0)}]
-"""
-        st.code(prisma_mermaid, language="mermaid")
-
-        # Optional: generate paper with Gemini
-        paper_md = ""
-        if use_gemini:
-            sources_bulleted = make_sources_bulleted(sources)
-            bibliography = make_bibliography(sources)
-
-            # Chọn template và prompt theo ngôn ngữ
-            if paper_language == "English":
-                MD_TEMPLATE = MD_TEMPLATE_EN
-                SYSTEM_STYLE_INSTR = SYSTEM_STYLE_INSTR_EN
-                SECTION_PROMPT = SECTION_PROMPT_EN
-                lang_code = "en"
-            else:
-                MD_TEMPLATE = MD_TEMPLATE_VI
-                SYSTEM_STYLE_INSTR = SYSTEM_STYLE_INSTR_VI
-                SECTION_PROMPT = SECTION_PROMPT_VI
-                lang_code = "vi"
-
-            def section(title, length_hint):
-                prompt = SECTION_PROMPT.format(
-                    system=SYSTEM_STYLE_INSTR,
-                    topic=topic,
-                    sources_bulleted=sources_bulleted,
-                    section_title=title,
-                    length_hint=length_hint
-                )
-                txt = write_with_gemini(gemini_model, prompt)
-                return enforce_citation_integrity(txt, len(bibliography))
-
-            with st.spinner("Gemini đang soạn bài..." if lang_code=="vi" else "Gemini is generating the paper..."):
-                # Đặt tiêu đề section theo ngôn ngữ
-                if lang_code == "en":
-                    intro = section("Introduction: background, key concepts, importance, and research gap", 450)
-                    methods = section("Methods: search strategy, PRISMA criteria, databases, quality assessment", 350)
-                    results = section("Results: topic clusters, quantitative trends, main findings vs research objectives", 400)
-                    discussion = section("Discussion: interpret findings, compare with literature, policy/practice implications, academic debates", 450)
-                    conclusion = section("Conclusion: summary of contributions, future research directions", 220)
-                    limitations = section("Limitations: data, methods, coverage; how to address in the future", 200)
-                    paper_title = f"Systematic Review on {topic}"
-                else:
-                    intro = section("Giới thiệu: bối cảnh, khái niệm trọng tâm, tầm quan trọng và khoảng trống nghiên cứu", 450)
-                    methods = section("Phương pháp: chiến lược tìm kiếm, tiêu chí PRISMA, cơ sở dữ liệu, cách đánh giá chất lượng nghiên cứu", 350)
-                    results = section("Kết quả: các cụm chủ đề, khuynh hướng định lượng, phát hiện chính so với mục tiêu nghiên cứu", 400)
-                    discussion = section("Thảo luận: diễn giải phát hiện, so sánh với tài liệu, hàm ý chính sách/thực hành, tranh luận học thuật", 450)
-                    conclusion = section("Kết luận: tóm tắt đóng góp, hướng nghiên cứu tiếp theo", 220)
-                    limitations = section("Hạn chế: dữ liệu, phương pháp, độ bao phủ; cách khắc phục trong tương lai", 200)
-                    paper_title = f"Tổng quan hệ thống về {topic}"
-
-                context = {
-                    "title": paper_title,
-                    "subtitle": subtitle,
-                    "author": author_name,
-                    "date": datetime.now().strftime("%Y-%m-%d"),
-                    "keywords": keywords,
-                    "intro": intro,
-                    "methods": methods,
-                    "results": results,
-                    "discussion": discussion,
-                    "conclusion": conclusion,
-                    "limitations": limitations,
-                    "prisma_mermaid": prisma_mermaid,
-                    "bibliography": bibliography
-                }
-                paper_md = Template(MD_TEMPLATE).render(**context)
-
-            st.subheader("📝 Bản thảo (Markdown)")
-            st.code(paper_md, language="markdown")
-            st.download_button("⬇️ Tải paper.md", paper_md.encode("utf-8"), file_name="paper.md", mime="text/markdown")
-
-            # Thêm nút xuất PDF
-            if st.button("📄 Xuất PDF"):
-                with st.spinner("Đang chuyển sang PDF..."):
-                    html = markdown.markdown(paper_md, extensions=["tables"])
-                    # Lưu HTML tạm thời
-                    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_html:
-                        tmp_html.write(html.encode("utf-8"))
-                        tmp_html.flush()
-                        pdf_file = tmp_html.name.replace(".html", ".pdf")
-                        pdfkit.from_file(tmp_html.name, pdf_file)
-                        with open(pdf_file, "rb") as f:
-                            st.download_button("⬇️ Tải paper.pdf", f, file_name="paper.pdf", mime="application/pdf")
-        with st.expander("💡 Gợi ý xuất PDF (tuỳ chọn)"):
-            st.markdown("""
-- Dùng **Pandoc** với filter Mermaid hoặc render Mermaid → PNG trước, rồi nhúng hình vào Markdown.
-- Hoặc copy khối Markdown vào Obsidian/MkDocs/VS Code (Markdown Preview Enhanced) để render Mermaid.
-""")
+    # 1. Tìm kiếm OpenAlex
+    with st.spinner("Đang tìm dữ liệu từ OpenAlex..."):
+        works = openalex_search(topic, year_range, per_page, max_pages, auto_expand_vi)
+    
+    if not works:
+        st.error("Không tìm thấy bài báo nào. Thử thay đổi từ khóa hoặc năm.")
     else:
-        st.warning("Không thu được nguồn nào. Hãy nới rộng năm, tăng `max_pages`, bật 'Nới lỏng loại tài liệu' và 'Tự mở rộng từ khoá VI→EN', hoặc tắt xác thực DOI.")
-else:
-    st.info("Nhập cấu hình ở thanh bên và ấn **🚀 Tạo bài viết** để bắt đầu.")
+        # Lọc sơ bộ: Lấy top N bài có trích dẫn cao nhất hoặc mới nhất
+        works.sort(key=lambda x: x.get('cited_by_count', 0), reverse=True)
+        sources = works[:int(max_sources)]
+        
+        df = pd.DataFrame(sources)
+        
+        # 2. Tạo BibTeX keys và entries
+        bib_entries, bib_keys = make_bibtex_entries(sources)
+        sources_list_str = make_sources_bulleted(sources, bib_keys)
+
+        # 3. Vẽ biểu đồ và lưu file ảnh (để LaTeX dùng)
+        fig = plot_publications_by_year(df)
+        fig.savefig("fig_publications_by_year.png", dpi=300)
+        
+        with colL:
+            st.subheader("📚 Nguồn dữ liệu (Top cited)")
+            st.dataframe(df[["year", "title", "venue", "cited_by_count"]], height=300)
+            st.pyplot(fig)
+
+        # 4. Viết bài bằng Gemini
+        if use_gemini:
+            st.subheader("🤖 Gemini đang viết bài (LaTeX)...")
+            
+            # Cấu hình ngôn ngữ cho prompt
+            if paper_language == "Tiếng Việt":
+                lang_code = "vi"
+                section_titles = {
+                    "intro": "Giới thiệu", "methods": "Phương pháp nghiên cứu",
+                    "results": "Kết quả", "discussion": "Thảo luận", "conclusion": "Kết luận"
+                }
+                system_prompt = f"""
+                Bạn là một nhà nghiên cứu khoa học viết bài bằng tiếng Việt chuẩn mực. 
+                Nhiệm vụ: Viết một phần của bài báo khoa học về chủ đề: "{topic}".
+                Yêu cầu quan trọng:
+                1. Đầu ra phải là văn bản thô (plain text) hoặc mã LaTeX cơ bản (ví dụ: \textit{{...}}, \textbf{{...}}).
+                2. SỬ DỤNG TRÍCH DẪN: Bạn phải trích dẫn các nguồn sau đây bằng lệnh \cite{{KEY}}.
+                Danh sách nguồn hợp lệ (Kèm Key để trích dẫn):
+                {sources_list_str}
+                3. Tuyệt đối không bịa đặt nguồn. Chỉ dùng \cite{{KEY}} với các KEY có trong danh sách trên.
+                4. Không dùng Markdown (như **bold**), hãy dùng LaTeX (như \\textbf{{bold}}).
+                """
+            else:
+                lang_code = "en"
+                section_titles = {
+                    "intro": "Introduction", "methods": "Methodology",
+                    "results": "Results", "discussion": "Discussion", "conclusion": "Conclusion"
+                }
+                system_prompt = f"""
+                You are a scientific researcher writing in academic English.
+                Task: Write a section for a paper on the topic: "{topic}".
+                Key Requirements:
+                1. Output plain text or basic LaTeX code (e.g., \textit{{...}}).
+                2. CITATIONS: You MUST cite the provided sources using \cite{{KEY}}.
+                Valid Sources List (with Keys):
+                {sources_list_str}
+                3. Do not fabricate citations. Only use \cite{{KEY}} from the list above.
+                4. Do not use Markdown, use LaTeX syntax.
+                """
+
+            # Hàm gọi Gemini cho từng phần
+            def generate_section(sec_name, context_note=""):
+                prompt = f"{system_prompt}\n\nVIẾT PHẦN: {sec_name.upper()}.\n{context_note}\nĐộ dài khoảng 300-400 từ."
+                with st.spinner(f"Đang viết phần {sec_name}..."):
+                    return write_with_gemini(gemini_model, prompt)
+
+            # Generate từng phần
+            abstract_content = generate_section("Abstract (Tóm tắt)", "Tóm tắt mục tiêu, phương pháp và kết quả chính.")
+            intro_content = generate_section("Introduction", "Nêu bối cảnh, lý do nghiên cứu.")
+            methods_content = generate_section("Methods", "Mô tả cách thức tổng hợp tài liệu từ OpenAlex.")
+            results_content = generate_section("Results", "Tổng hợp các phát hiện chính từ các nguồn tài liệu.")
+            discussion_content = generate_section("Discussion", "Bàn luận về ý nghĩa, so sánh các nghiên cứu.")
+            conclusion_content = generate_section("Conclusion", "Kết luận ngắn gọn.")
+
+            # 5. Render Template
+            ctx = {
+                "lang": lang_code,
+                "title": f"Báo cáo tổng quan về {topic}" if lang_code == 'vi' else f"Review on {topic}",
+                "author": author_name,
+                "affiliation": affiliation,
+                "abstract_content": abstract_content,
+                "intro_title": section_titles["intro"],
+                "intro_content": intro_content,
+                "methods_title": section_titles["methods"],
+                "methods_content": methods_content,
+                "results_title": section_titles["results"],
+                "results_content": results_content,
+                "discussion_title": section_titles["discussion"],
+                "discussion_content": discussion_content,
+                "conclusion_title": section_titles["conclusion"],
+                "conclusion_content": conclusion_content,
+                "bib_entries": bib_entries
+            }
+
+            latex_source = Template(LATEX_TEMPLATE).render(**ctx)
+            
+            with colR:
+                st.success("Đã tạo xong mã LaTeX!")
+                st.text_area("LaTeX Source", latex_source, height=600)
+                
+                # Nút tải xuống
+                st.download_button(
+                    label="⬇️ Tải file paper.tex",
+                    data=latex_source,
+                    file_name="paper.tex",
+                    mime="application/x-tex"
+                )
+                
+                st.warning("Lưu ý: Để biên dịch (compile) file này, hãy tải cả hình ảnh biểu đồ bên dưới và để cùng thư mục.")
+                with open("fig_publications_by_year.png", "rb") as f:
+                    st.download_button(
+                        label="⬇️ Tải biểu đồ (png)",
+                        data=f,
+                        file_name="fig_publications_by_year.png",
+                        mime="image/png"
+                    )
