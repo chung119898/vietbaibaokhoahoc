@@ -1,12 +1,15 @@
-# streamlit_app_gemini.py (Updated for Gemini 3.0 - 2026 Edition)
+# streamlit_app_gemini.py (Gemini 3.0 + Auto Charting)
 import os
+import json
 import streamlit as st
 import google.generativeai as genai
+import matplotlib.pyplot as plt
+import pandas as pd
 
 # ================== Cấu hình giao diện ==================
-st.set_page_config(page_title="AI Paper Writer (Gemini 3.0)", layout="wide")
-st.title("✍️ AI Scientist: Viết báo khoa học với Gemini 3.0")
-st.caption("Sử dụng thế hệ mô hình Gemini 3 mới nhất (2026) cho tốc độ và khả năng tư duy học thuật vượt trội.")
+st.set_page_config(page_title="AI Paper Writer + Chart", layout="wide")
+st.title("✍️ AI Scientist: Viết báo & Tự vẽ biểu đồ (Gemini 3.0)")
+st.caption("Phiên bản nâng cấp: Tự động sinh số liệu giả lập, vẽ biểu đồ và nhúng vào bài báo LaTeX.")
 
 # ================== Sidebar ==================
 with st.sidebar:
@@ -15,41 +18,64 @@ with st.sidebar:
     if not api_key:
         api_key = os.environ.get("GEMINI_API_KEY")
 
-    # CẬP NHẬT DANH SÁCH MODEL MỚI NHẤT (2026)
+    # Danh sách Model 2026
     model_options = [
-        "gemini-3-flash",          # Mới nhất: Tốc độ cực nhanh, mặc định
-        "gemini-3-pro",            # Mới nhất: Tư duy sâu (Deep Think)
-        "gemini-2.5-flash",        # Bản ổn định trước đó
-        "gemini-2.5-pro",          
-        "gemini-2.0-flash"         # Legacy
+        "gemini-3-flash",          # Ưu tiên tốc độ
+        "gemini-3-pro",            # Ưu tiên chất lượng
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-flash"
     ]
     model_name = st.selectbox("Chọn Model", model_options, index=0)
     
-    # Nút kiểm tra thực tế xem Key của bạn chạy được model nào
-    if st.button("🔍 Check Model khả dụng"):
-        if not api_key:
-            st.error("Cần nhập API Key trước.")
-        else:
-            try:
-                genai.configure(api_key=api_key)
-                st.info("Đang kiểm tra API...")
-                available_models = []
-                for m in genai.list_models():
-                    if 'generateContent' in m.supported_generation_methods:
-                        # Chỉ lấy tên ngắn gọn để dễ nhìn
-                        name = m.name.replace("models/", "")
-                        available_models.append(name)
-                st.success(f"Các model Key này dùng được: {available_models}")
-            except Exception as e:
-                st.error(f"Lỗi kết nối: {e}")
-
     language = st.selectbox("Ngôn ngữ", ["Tiếng Việt", "English"], 0)
     
     st.divider()
     st.markdown("### Thông tin bài báo")
     author_name = st.text_input("Tên tác giả", "Nguyen Van A")
     affiliation = st.text_input("Đơn vị công tác", "VNU University of Science")
-    paper_type = st.selectbox("Loại bài", ["Review Article (Tổng quan)", "Original Research (Nghiên cứu gốc)"])
+    paper_type = st.selectbox("Loại bài", ["Review Article", "Original Research"])
+    
+    # TÙY CHỌN MỚI
+    include_chart = st.checkbox("Tự động tạo biểu đồ minh hoạ?", True, help="AI sẽ tự nghĩ ra số liệu và vẽ biểu đồ")
+
+# ================== Helper: Vẽ biểu đồ từ JSON ==================
+def create_chart_from_json(chart_data):
+    """
+    Vẽ biểu đồ từ JSON và lưu thành file 'chart.png'
+    """
+    try:
+        data = chart_data.get("data", [])
+        if not data: return False
+        
+        df = pd.DataFrame(data)
+        
+        # Cấu hình style
+        plt.figure(figsize=(8, 5))
+        
+        # Vẽ tùy loại
+        chart_type = chart_data.get("type", "bar")
+        colors = ['#4E79A7', '#F28E2B', '#E15759', '#76B7B2', '#59A14F']
+        
+        if chart_type == "line":
+            plt.plot(df['label'], df['value'], marker='o', linestyle='-', color='#4E79A7', linewidth=2)
+            plt.grid(True, linestyle='--', alpha=0.5)
+        else:
+            plt.bar(df['label'], df['value'], color=colors[:len(df)])
+            
+        plt.title(chart_data.get("title", "Data Chart"), fontsize=14, fontweight='bold')
+        plt.xlabel(chart_data.get("x_label", "X"), fontsize=11)
+        plt.ylabel(chart_data.get("y_label", "Y"), fontsize=11)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+        
+        # Lưu file để LaTeX dùng
+        plt.savefig("chart.png", dpi=300)
+        plt.close() # Đóng plot để giải phóng mem
+        return True
+    except Exception as e:
+        st.error(f"Lỗi vẽ biểu đồ: {e}")
+        return False
 
 # ================== Main UI ==================
 col1, col2 = st.columns([1, 1])
@@ -57,13 +83,14 @@ col1, col2 = st.columns([1, 1])
 with col1:
     st.subheader("1. Nhập chủ đề")
     topic = st.text_area("Chủ đề bài báo", height=150, 
-                        placeholder="Ví dụ: Ứng dụng Generative AI trong giáo dục đại học tại Việt Nam...")
-    extra_instructions = st.text_area("Yêu cầu thêm (Tuỳ chọn)", 
-                                     placeholder="Ví dụ: Tập trung vào các thách thức đạo đức, trích dẫn chuẩn APA 7...")
-    generate_btn = st.button("🚀 Viết bài ngay (Gemini 3.0)", type="primary")
+                        placeholder="Ví dụ: Hiệu quả của mô hình AI trong chẩn đoán ung thư phổi...")
+    extra_instructions = st.text_area("Yêu cầu thêm", 
+                                     placeholder="Ví dụ: So sánh độ chính xác (Accuracy) giữa các thuật toán...")
+    generate_btn = st.button("🚀 Viết bài & Vẽ hình", type="primary")
 
 with col2:
-    st.subheader("2. Kết quả (LaTeX Code)")
+    st.subheader("2. Kết quả")
+    chart_area = st.empty()
     latex_output = st.empty()
 
 # ================== Logic xử lý ==================
@@ -78,68 +105,123 @@ if generate_btn:
     genai.configure(api_key=api_key)
     model = genai.GenerativeModel(model_name)
 
-    # Prompt tối ưu cho Gemini 3.0 (Tư duy sâu hơn)
-    if language == "Tiếng Việt":
-        sys_prompt = "Bạn là giáo sư đầu ngành. Hãy viết bài báo khoa học chuẩn LaTeX với tư duy phản biện sắc bén."
-        user_req = rf"""
-        Viết trọn vẹn một bài báo khoa học về: "{topic}".
-        
-        THÔNG TIN:
-        - Tác giả: {author_name} ({affiliation})
-        - Loại bài: {paper_type}
-        - Ghi chú: {extra_instructions}
-
-        YÊU CẦU CẤU TRÚC (LaTeX):
-        1. \documentclass{{article}} (sử dụng gói 'vietnam', 'geometry', 'cite').
-        2. Title, Abstract (Viết súc tích, học thuật).
-        3. Các phần: Introduction, Methods, Results, Discussion, Conclusion.
-        4. Tài liệu tham khảo: TỰ TỔNG HỢP 15-20 nguồn trích dẫn giả lập nhưng có tính thực tế cao (tên tác giả, năm, tạp chí phù hợp). 
-           - Sử dụng lệnh \cite{{key}} trong bài viết.
-           - Liệt kê trong môi trường \begin{{thebibliography}}.
-
-        OUTPUT:
-        - Chỉ trả về mã nguồn LaTeX (Raw Text).
-        - Đảm bảo độ dài và độ sâu chuyên môn phù hợp với Gemini 3.0.
-        """
-    else:
-        sys_prompt = "You are a distinguished professor. Write a high-impact scientific paper in LaTeX."
-        user_req = rf"""
-        Topic: "{topic}".
-        - Author: {author_name} ({affiliation})
-        - Type: {paper_type}
-        - Note: {extra_instructions}
-
-        REQUIRED LATEX STRUCTURE:
-        1. \documentclass{{article}}.
-        2. Title, Abstract.
-        3. Sections: Introduction, Methods, Results, Discussion, Conclusion.
-        4. References: SYNTHESIZE 15-20 high-quality plausible citations. 
-           - Use \cite{{key}} throughout the text.
-           - List them in \begin{{thebibliography}}.
-
-        OUTPUT: Return ONLY raw LaTeX code.
-        """
-
-    with st.spinner(f"Gemini 3.0 ({model_name}) đang suy nghĩ và soạn thảo..."):
-        try:
-            response = model.generate_content([sys_prompt, user_req])
-            tex_content = response.text
+    # --- BƯỚC 1: SINH DỮ LIỆU & VẼ BIỂU ĐỒ (Nếu chọn) ---
+    has_chart = False
+    
+    if include_chart:
+        with st.spinner("🤖 Đang phân tích chủ đề và sinh số liệu giả lập..."):
+            # Prompt chuyên biệt để sinh JSON dữ liệu
+            data_prompt = f"""
+            Generate a JSON object for a HYPOTHETICAL data chart related to the topic: "{topic}".
+            The data should be realistic and suitable for a scientific paper (e.g., comparing accuracy, time efficiency, growth trends).
             
-            # Làm sạch Markdown fences nếu có
-            tex_content = tex_content.replace("```latex", "").replace("```", "").strip()
+            STRICT JSON FORMAT (No markdown):
+            {{
+                "title": "Chart Title (Scientific)",
+                "type": "bar",  // OR "line"
+                "x_label": "X Axis Label",
+                "y_label": "Y Axis Label",
+                "data": [
+                    {{"label": "Item A", "value": 85.5}},
+                    {{"label": "Item B", "value": 92.1}},
+                    ... (min 4 items)
+                ]
+            }}
+            """
+            try:
+                # Dùng model flash để sinh dữ liệu cho nhanh
+                data_resp = model.generate_content(data_prompt)
+                txt = data_resp.text.replace("```json", "").replace("```", "").strip()
+                
+                # Xử lý trường hợp Gemini trả về text thừa
+                start_idx = txt.find("{")
+                end_idx = txt.rfind("}") + 1
+                if start_idx != -1 and end_idx != -1:
+                    json_str = txt[start_idx:end_idx]
+                    chart_json = json.loads(json_str)
+                    
+                    # Vẽ biểu đồ bằng Matplotlib
+                    if create_chart_from_json(chart_json):
+                        has_chart = True
+                        chart_area.image("chart.png", caption=f"Hình 1: {chart_json['title']}")
+                        st.success("✅ Đã tạo biểu đồ dữ liệu thành công!")
+                else:
+                    st.warning("Không tìm thấy JSON hợp lệ trong phản hồi dữ liệu.")
+                    
+            except Exception as e:
+                st.warning(f"Không thể tạo biểu đồ (Lỗi: {e}). Tiếp tục viết bài không có hình.")
+
+    # --- BƯỚC 2: VIẾT BÀI BÁO LATEX ---
+    with st.spinner(f"✍️ Gemini đang viết bài báo ({model_name})..."):
+        
+        # Hướng dẫn chèn ảnh nếu có
+        chart_instruction = ""
+        if has_chart:
+            if language == "Tiếng Việt":
+                chart_instruction = r"""
+                QUAN TRỌNG: Tôi đã có sẵn một file ảnh tên là `chart.png`. 
+                Hãy chèn nó vào phần 'Kết quả' (Results) bằng lệnh LaTeX: 
+                \begin{figure}[h] \centering \includegraphics[width=0.8\textwidth]{chart.png} \caption{Mô tả biểu đồ...} \label{fig:chart1} \end{figure}
+                Và hãy viết một đoạn văn bình luận/phân tích về số liệu trong biểu đồ này.
+                """
+            else:
+                chart_instruction = r"""
+                IMPORTANT: A chart image named `chart.png` is available. 
+                Insert it into the 'Results' section using:
+                \begin{figure}[h] \centering \includegraphics[width=0.8\textwidth]{chart.png} \caption{Chart description...} \label{fig:chart1} \end{figure}
+                And write a paragraph analyzing the data shown in this chart.
+                """
+
+        # Prompt chính
+        if language == "Tiếng Việt":
+            user_req = rf"""
+            Viết bài báo khoa học về: "{topic}".
+            - Tác giả: {author_name} ({affiliation})
+            - Loại: {paper_type}
+            - Note: {extra_instructions}
+            
+            {chart_instruction}
+
+            CẤU TRÚC LATEX BẮT BUỘC:
+            1. \documentclass{{article}} (dùng gói 'vietnam', 'graphicx', 'geometry', 'cite').
+            2. Title, Abstract.
+            3. Sections: Introduction, Methods, Results, Discussion, Conclusion.
+            4. References: TỰ TẠO 15 tài liệu tham khảo giả lập nhưng hợp lý.
+            
+            OUTPUT: Chỉ trả về mã nguồn LaTeX (Raw Text).
+            """
+        else:
+            user_req = rf"""
+            Topic: "{topic}".
+            - Author: {author_name} ({affiliation})
+            - Type: {paper_type}
+            - Note: {extra_instructions}
+
+            {chart_instruction}
+
+            REQUIRED LATEX:
+            1. \documentclass{{article}} (use package 'graphicx').
+            2. Title, Abstract.
+            3. Sections: Introduction, Methods, Results, Discussion, Conclusion.
+            4. References: Generate 15 plausible citations.
+
+            OUTPUT: Return ONLY raw LaTeX code.
+            """
+
+        try:
+            response = model.generate_content(user_req)
+            tex_content = response.text.replace("```latex", "").replace("```", "").strip()
             
             latex_output.code(tex_content, language="latex")
             
-            # Tải xuống
-            st.download_button(
-                label="⬇️ Tải file paper.tex",
-                data=tex_content,
-                file_name="paper_gemini3.tex",
-                mime="application/x-tex"
-            )
-            st.success(f"Hoàn tất với {model_name}!")
+            # Nút tải xuống
+            col_d1, col_d2 = st.columns(2)
+            with col_d1:
+                st.download_button("⬇️ Tải paper.tex", tex_content, "paper.tex", "application/x-tex")
+            if has_chart:
+                with col_d2:
+                    with open("chart.png", "rb") as f:
+                        st.download_button("⬇️ Tải chart.png", f, "chart.png", "image/png")
             
         except Exception as e:
-            st.error(f"Lỗi: {e}")
-            if "404" in str(e) or "not found" in str(e):
-                st.warning("Key của bạn có thể chưa hỗ trợ Gemini 3.0. Hãy thử chuyển xuống 'gemini-2.5-flash' ở menu bên trái.")
+            st.error(f"Lỗi viết bài: {e}")
