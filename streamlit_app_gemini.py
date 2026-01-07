@@ -1,4 +1,4 @@
-# streamlit_app_gemini.py (Fix lỗi Model + Giữ tính năng Vẽ biểu đồ)
+# streamlit_app_gemini.py (Gemini 3.0 + Auto Charting)
 import os
 import json
 import streamlit as st
@@ -8,8 +8,8 @@ import pandas as pd
 
 # ================== Cấu hình giao diện ==================
 st.set_page_config(page_title="AI Paper Writer + Chart", layout="wide")
-st.title("✍️ AI Scientist: Viết báo & Tự vẽ biểu đồ")
-st.caption("Sử dụng Gemini 1.5 để tự động sinh số liệu, vẽ biểu đồ và viết bài báo khoa học.")
+st.title("✍️ AI Scientist: Viết báo & Tự vẽ biểu đồ (Gemini 3.0)")
+st.caption("Phiên bản nâng cấp: Tự động sinh số liệu giả lập, vẽ biểu đồ và nhúng vào bài báo LaTeX.")
 
 # ================== Sidebar ==================
 with st.sidebar:
@@ -18,26 +18,16 @@ with st.sidebar:
     if not api_key:
         api_key = os.environ.get("GEMINI_API_KEY")
 
-    # SỬA LẠI DANH SÁCH MODEL CHUẨN ĐANG HOẠT ĐỘNG
+    # Danh sách Model 2026
     model_options = [
-        "gemini-1.5-flash",        # Bản nhanh, ổn định nhất hiện nay
-        "gemini-1.5-pro",          # Bản mạnh về tư duy
-        "gemini-pro"               # Bản 1.0 (Legacy)
+        "gemini-3-flash",          # Ưu tiên tốc độ
+        "gemini-3-pro",            # Ưu tiên chất lượng
+        "gemini-2.5-flash",
+        "gemini-2.5-pro",
+        "gemini-1.5-flash"
     ]
     model_name = st.selectbox("Chọn Model", model_options, index=0)
     
-    # Nút kiểm tra nhanh
-    if st.button("🔍 Kiểm tra kết nối"):
-        if not api_key:
-            st.error("Chưa nhập API Key")
-        else:
-            try:
-                genai.configure(api_key=api_key)
-                genai.list_models()
-                st.success("Kết nối API thành công!")
-            except Exception as e:
-                st.error(f"Lỗi Key: {e}")
-
     language = st.selectbox("Ngôn ngữ", ["Tiếng Việt", "English"], 0)
     
     st.divider()
@@ -46,8 +36,8 @@ with st.sidebar:
     affiliation = st.text_input("Đơn vị công tác", "VNU University of Science")
     paper_type = st.selectbox("Loại bài", ["Review Article", "Original Research"])
     
-    # TÙY CHỌN: Tự động vẽ biểu đồ
-    include_chart = st.checkbox("Tự động tạo biểu đồ minh hoạ?", True)
+    # TÙY CHỌN MỚI
+    include_chart = st.checkbox("Tự động tạo biểu đồ minh hoạ?", True, help="AI sẽ tự nghĩ ra số liệu và vẽ biểu đồ")
 
 # ================== Helper: Vẽ biểu đồ từ JSON ==================
 def create_chart_from_json(chart_data):
@@ -123,7 +113,7 @@ if generate_btn:
             # Prompt chuyên biệt để sinh JSON dữ liệu
             data_prompt = f"""
             Generate a JSON object for a HYPOTHETICAL data chart related to the topic: "{topic}".
-            The data should be realistic and suitable for a scientific paper.
+            The data should be realistic and suitable for a scientific paper (e.g., comparing accuracy, time efficiency, growth trends).
             
             STRICT JSON FORMAT (No markdown):
             {{
@@ -139,7 +129,7 @@ if generate_btn:
             }}
             """
             try:
-                # Gọi model
+                # Dùng model flash để sinh dữ liệu cho nhanh
                 data_resp = model.generate_content(data_prompt)
                 txt = data_resp.text.replace("```json", "").replace("```", "").strip()
                 
